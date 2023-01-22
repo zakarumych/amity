@@ -1,0 +1,13 @@
+[package]
+name = "amity"
+version = "0.0.0"
+edition = "2021"
+authors = ["Zakarum <zaq.dev@icloud.com>"]
+license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/amity"
+homepage = "https://github.com/zakarumych/amity"
+repository = "https://github.com/zakarumych/amity"
+readme = "README.md"
+description = "Concurrency algorithms"
+keywords = ["concurrency", "algorithms", "lock-free", "wait-free", "no-std"]
+categories = ["concurrency", "algorithms", "no-std"]
