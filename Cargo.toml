@@ -12,10 +12,10 @@ description = "Concurrency algorithms"
 keywords = ["concurrency", "algorithms", "lock-free", "wait-free", "no-std"]
 categories = ["concurrency", "algorithms", "no-std"]
 
-
 [features]
 std = []
 default = ["std"]
 
 [dependencies]
-sptr = { version = "0.3.2" }
+sptr = { version = "0.3" }
+lock_api = { version = "0.4" }

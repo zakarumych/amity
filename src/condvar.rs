@@ -325,4 +325,10 @@ impl CondVar {
     pub fn wait_for(&self, load: Ordering, target: u8) {
         self.wait(load, |state| state == target);
     }
+
+    /// Loads the current state.
+    #[inline]
+    pub fn load(&self, load: Ordering) -> u8 {
+        self.atomic.load(load).state().value() as u8
+    }
 }

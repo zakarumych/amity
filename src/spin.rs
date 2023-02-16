@@ -2,11 +2,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::backoff::BackOff;
 
-pub struct SpinRaw {
+pub struct RawSpin {
     lock: AtomicBool,
 }
 
-impl SpinRaw {
+impl RawSpin {
     pub const fn new() -> Self {
         Self {
             lock: AtomicBool::new(false),
@@ -34,4 +34,28 @@ impl SpinRaw {
     pub fn unlock(&self) {
         self.lock.store(false, Ordering::Release);
     }
+}
+
+unsafe impl lock_api::RawMutex for RawSpin {
+    type GuardMarker = lock_api::GuardSend;
+
+    const INIT: Self = Self::new();
+
+    #[inline(always)]
+    fn is_locked(&self) -> bool {
+        self.is_locked()
+    }
+
+    #[inline(always)]
+    fn try_lock(&self) -> bool {
+        self.try_lock()
+    }
+
+    #[inline(always)]
+    fn lock(&self) {
+        self.lock()
+    }
+
+    #[inline(always)]
+    unsafe fn unlock(&self) {}
 }
