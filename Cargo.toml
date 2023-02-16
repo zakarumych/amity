@@ -11,3 +11,12 @@ readme = "README.md"
 description = "Concurrency algorithms"
 keywords = ["concurrency", "algorithms", "lock-free", "wait-free", "no-std"]
 categories = ["concurrency", "algorithms", "no-std"]
+
+
+[features]
+std = []
+default = ["park-wait-std"]
+park-wait-std = ["std", "sptr"]
+
+[dependencies]
+sptr = { version = "0.3.2", optional = true }

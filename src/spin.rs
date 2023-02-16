@@ -1,54 +1,37 @@
-//!
-//! Configurable spin-lock.
-//!
-
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Basic spin-lock.
-/// Works by spinning on atomic boolean flag.
-pub struct Spin {
-    locked: AtomicBool,
+use crate::backoff::BackOff;
+
+pub struct SpinRaw {
+    lock: AtomicBool,
 }
 
-impl Spin {
-    /// Returns new spin-lock.
+impl SpinRaw {
     pub const fn new() -> Self {
-        Spin {
-            locked: AtomicBool::new(false),
+        Self {
+            lock: AtomicBool::new(false),
         }
     }
 
-    /// Returns `true` if spin-lock is locked.
-    /// Returns `false` if spin-lock is unlocked.
-    ///
-    /// The state may change in any moment,
-    /// after or even before this method returns.
-    ///
-    /// Use only as hint to the actual state.
     pub fn is_locked(&self) -> bool {
-        self.locked.load(Ordering::Relaxed)
+        self.lock.load(Ordering::Relaxed)
     }
 
-    /// Locks spin-lock.
-    ///
-    /// On success returns `true`.
-    /// Spin lock should be unlocked by calling `unlock` method.
-    ///
-    /// On failure returns `false`.
-    /// Lock is not acquired.
     pub fn try_lock(&self) -> bool {
-        !self.locked.swap(true, Ordering::Acquire)
+        self.lock.swap(true, Ordering::Acquire) == false
     }
 
-    /// Locks spin-lock.
-    /// Spins until lock is acquired.
-    /// On each iteration calls `yeet` function that can perform some
-    /// other work or yield CPU.
-    pub fn lock(&self, yeet: impl Fn()) {
+    pub fn lock(&self) {
+        let mut backoff = BackOff::new();
+
         while !self.try_lock() {
             while self.is_locked() {
-                yeet();
+                backoff.blocking_wait();
             }
         }
+    }
+
+    pub fn unlock(&self) {
+        self.lock.store(false, Ordering::Release);
     }
 }

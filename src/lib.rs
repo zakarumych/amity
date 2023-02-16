@@ -2,6 +2,10 @@
 //! Amity crate.
 //!
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-mod spin;
+pub mod backoff;
+pub mod condvar;
+pub mod mutex;
+pub mod spin;
+pub mod state_ptr;
