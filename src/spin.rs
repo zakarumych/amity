@@ -1,12 +1,22 @@
-use core::sync::atomic::{AtomicBool, Ordering};
+use crate::{
+    backoff::BackOff,
+    sync::{AtomicBool, Ordering},
+};
 
-use crate::backoff::BackOff;
-
+/// A simple spin-lock.
 pub struct RawSpin {
     lock: AtomicBool,
 }
 
 impl RawSpin {
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        Self {
+            lock: AtomicBool::new(false),
+        }
+    }
+
+    #[cfg(not(loom))]
     pub const fn new() -> Self {
         Self {
             lock: AtomicBool::new(false),
@@ -36,6 +46,7 @@ impl RawSpin {
     }
 }
 
+#[cfg(not(loom))]
 unsafe impl lock_api::RawMutex for RawSpin {
     type GuardMarker = lock_api::GuardSend;
 

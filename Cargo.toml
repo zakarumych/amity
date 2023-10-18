@@ -13,9 +13,9 @@ keywords = ["concurrency", "algorithms", "lock-free", "wait-free", "no-std"]
 categories = ["concurrency", "algorithms", "no-std"]
 
 [features]
-std = []
+std = ["alloc"]
+alloc = []
 default = ["std"]
 
 [dependencies]
-sptr = { version = "0.3" }
 lock_api = { version = "0.4" }

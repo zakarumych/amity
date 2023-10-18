@@ -1,15 +1,22 @@
-use core::sync::atomic::Ordering;
-
 use crate::{
     condvar::{CondVar, CondVarWake},
-    park::{DefaultPark, Park, Unpark},
+    park::{DefaultPark, Park, ParkYield, Unpark},
+    sync::Ordering,
 };
 
 const UNLOCKED: u8 = 0;
 const LOCKED: u8 = 1;
 
+/// Raw mutex that uses thread parking when waiting for the lock.
+///
+/// It can only be used with `"std"`.
 #[cfg(feature = "std")]
-pub type StdRawMutex = RawMutex<std::thread::Thread>;
+pub type StdRawMutex = RawMutex<crate::sync::Thread>;
+
+/// Raw mutex that uses thread yielding when waiting for the lock.
+///
+/// It causes busy waiting but can be used without `"std"`.
+pub type YieldRawMutex = RawMutex<ParkYield>;
 
 pub struct RawMutex<T> {
     condvar: CondVar<T>,
@@ -17,9 +24,18 @@ pub struct RawMutex<T> {
 
 impl<T> RawMutex<T> {
     #[inline(always)]
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        RawMutex {
+            condvar: CondVar::zero(),
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(not(loom))]
     pub const fn new() -> Self {
-        Self {
-            condvar: CondVar::new(0),
+        RawMutex {
+            condvar: CondVar::zero(),
         }
     }
 
@@ -98,6 +114,7 @@ where
     }
 }
 
+#[cfg(not(loom))]
 unsafe impl<T> lock_api::RawMutex for RawMutex<T>
 where
     T: DefaultPark,

@@ -6,15 +6,9 @@
 //! It preserves pointer provenance and allows to use restored pointer safely
 //! under strict-provenance rules.
 
-use core::{
-    marker::PhantomData,
-    mem::align_of,
-    ptr::null_mut,
-    sync::atomic::{AtomicPtr, Ordering},
-};
+use core::{marker::PhantomData, mem::align_of, ptr::null_mut};
 
-use sptr::Strict;
-
+use crate::sync::{AtomicPtr, Ordering};
 /// State wrapper for `usize` that ensures that
 /// address bits for pointer to `T` are not set.
 #[repr(transparent)]
@@ -46,7 +40,9 @@ impl<T> State<T> {
     pub const STATE_MASK: usize = <PtrState<T>>::STATE_MASK;
 
     /// Zero state.
-    pub const ZERO: Self = State(0, PhantomData);
+    pub const fn zero() -> Self {
+        State(0, PhantomData)
+    }
 
     /// Returns state value.
     #[inline(always)]
@@ -81,7 +77,7 @@ impl<T> From<State<T>> for usize {
 }
 
 /// Stores pointer and state in lower bits of single pointer value.
-/// State is limited by pointer alignment.
+/// State size is limited by pointer alignment.
 ///
 /// `PtrState` keeps provenance of the pointer.
 #[repr(transparent)]
@@ -116,7 +112,16 @@ impl<T> PtrState<T> {
     pub const ADDR_MASK: usize = !Self::STATE_MASK;
 
     /// Null-pointer with zero state.
-    pub const NULL_ZERO: Self = PtrState(null_mut());
+    pub const fn null_zero() -> Self {
+        PtrState(null_mut())
+    }
+
+    /// Creates new `PtrState` with null pointer and state.
+    /// State is wrapped to ensure that only lower bits may be set.
+    #[inline(always)]
+    pub fn null_state(state: State<T>) -> Self {
+        PtrState::new(null_mut(), state)
+    }
 
     /// Creates new `PtrState` from pointer and state.
     /// State is wrapped to ensure that only lower bits may be set.
@@ -126,8 +131,7 @@ impl<T> PtrState<T> {
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline(always)]
     pub fn new(ptr: *mut T, state: State<T>) -> Self {
-        debug_assert_eq!(Strict::addr(ptr) & Self::STATE_MASK, 0);
-        PtrState(Strict::map_addr(ptr, |addr| addr | state.0))
+        PtrState(ptr.cast::<u8>().wrapping_add(state.0).cast())
     }
 
     /// Creates new `PtrState` from reference and state.
@@ -144,21 +148,13 @@ impl<T> PtrState<T> {
         PtrState::new(ptr as *mut _, state)
     }
 
-    /// Creates new `PtrState` with null pointer and state.
-    /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
-    pub const fn new_null(state: State<T>) -> Self {
-        PtrState(state.0 as _)
-    }
-
     /// Creates new `PtrState` with pointer and zero state.
     ///
     /// # Panics
     ///
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline(always)]
-    pub fn new_zero(ptr: *mut T) -> Self {
-        debug_assert_eq!(Strict::addr(ptr) & Self::STATE_MASK, 0);
+    pub const fn new_zero(ptr: *mut T) -> Self {
         PtrState(ptr)
     }
 
@@ -179,9 +175,7 @@ impl<T> PtrState<T> {
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn with_state(&self, state: State<T>) -> Self {
-        PtrState(Strict::map_addr(self.0, |value| {
-            (value & Self::ADDR_MASK) | state.0
-        }))
+        PtrState::new(self.ptr(), state)
     }
 
     /// Creates new `PtrState` with state from this value and new pointer.
@@ -191,26 +185,26 @@ impl<T> PtrState<T> {
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline(always)]
     pub fn with_ptr(&self, ptr: *mut T) -> Self {
-        PtrState(Strict::map_addr(ptr, |addr| {
-            addr | (Strict::addr(self.0) & Self::STATE_MASK)
-        }))
+        PtrState::new(ptr, self.state())
     }
 
     /// Returns pointer from this value.
     pub fn ptr(&self) -> *mut T {
-        Strict::map_addr(self.0, |addr| addr & Self::ADDR_MASK)
+        let state = (self.0 as usize) & Self::STATE_MASK;
+        self.0.cast::<u8>().wrapping_sub(state).cast()
     }
 
     /// Returns state from this value.
     pub fn state(&self) -> State<T> {
-        State(Strict::addr(self.0) & Self::STATE_MASK, PhantomData)
+        let state = (self.0 as usize) & Self::STATE_MASK;
+        State(state, PhantomData)
     }
 }
 
 /// Stores pointer and state in lower bits of single pointer value.
-/// State is limited by pointer alignment.
+/// State size is limited by pointer alignment.
 ///
-/// `PtrState` keeps provenance of the pointer.
+/// `AtomicPtrState` keeps provenance of the pointer.
 #[repr(transparent)]
 pub struct AtomicPtrState<T>(AtomicPtr<T>);
 
@@ -225,7 +219,23 @@ impl<T> AtomicPtrState<T> {
     pub const ADDR_MASK: usize = !Self::STATE_MASK;
 
     /// Null-pointer with zero state.
-    pub const NULL_ZERO: Self = AtomicPtrState(AtomicPtr::new(null_mut()));
+    #[cfg(loom)]
+    pub fn null_zero() -> Self {
+        AtomicPtrState(AtomicPtr::new(null_mut()))
+    }
+
+    /// Null-pointer with zero state.
+    #[cfg(not(loom))]
+    pub const fn null_zero() -> Self {
+        AtomicPtrState(AtomicPtr::new(null_mut()))
+    }
+
+    /// Creates new `AtomicPtrState` with null pointer and state.
+    /// State is wrapped to ensure that only lower bits may be set.
+    #[inline(always)]
+    pub fn null_state(state: State<T>) -> Self {
+        AtomicPtrState::new(null_mut(), state)
+    }
 
     /// Creates new `AtomicPtrState` from pointer and state.
     /// State is wrapped to ensure that only lower bits may be set.
@@ -235,8 +245,9 @@ impl<T> AtomicPtrState<T> {
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline(always)]
     pub fn new(ptr: *mut T, state: State<T>) -> Self {
-        debug_assert_eq!(Strict::addr(ptr) & Self::STATE_MASK, 0);
-        AtomicPtrState(AtomicPtr::new(Strict::map_addr(ptr, |addr| addr | state.0)))
+        AtomicPtrState(AtomicPtr::new(
+            ptr.cast::<u8>().wrapping_add(state.0).cast(),
+        ))
     }
 
     /// Creates new `AtomicPtrState` from reference and state.
@@ -253,13 +264,6 @@ impl<T> AtomicPtrState<T> {
         AtomicPtrState::new(ptr as *mut _, state)
     }
 
-    /// Creates new `AtomicPtrState` with null pointer and state.
-    /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
-    pub const fn new_null(state: State<T>) -> Self {
-        AtomicPtrState(AtomicPtr::new(state.0 as _))
-    }
-
     /// Creates new `AtomicPtrState` with pointer and zero state.
     ///
     /// # Panics
@@ -267,13 +271,21 @@ impl<T> AtomicPtrState<T> {
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline(always)]
     pub fn new_zero(ptr: *mut T) -> Self {
-        debug_assert_eq!(Strict::addr(ptr) & Self::STATE_MASK, 0);
         AtomicPtrState(AtomicPtr::new(ptr))
     }
 
     /// Constructs `AtomicPtrState` from raw pointer.
     /// Any existing state bits from raw pointer are preserved.
     #[inline(always)]
+    #[cfg(loom)]
+    pub fn from_raw(ptr: *mut T) -> Self {
+        AtomicPtrState(AtomicPtr::new(ptr))
+    }
+
+    /// Constructs `AtomicPtrState` from raw pointer.
+    /// Any existing state bits from raw pointer are preserved.
+    #[inline(always)]
+    #[cfg(not(loom))]
     pub const fn from_raw(ptr: *mut T) -> Self {
         AtomicPtrState(AtomicPtr::new(ptr))
     }

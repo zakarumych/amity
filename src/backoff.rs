@@ -1,7 +1,7 @@
 /// Waiting hint.
 /// Provides common exponential spin logic.
 /// When spin count exceeds spin limit it switches to yield when "std" feature is enabled.
-/// When spin count exceeds yield limit it advices caller to block thread.
+/// When spin count exceeds yield limit it advises caller to block thread.
 pub struct BackOff {
     spin_count: usize,
 }
@@ -22,8 +22,11 @@ impl BackOff {
 
     #[inline(always)]
     fn spin_loop(&self) {
-        for _ in 0..1 << self.spin_count {
-            core::hint::spin_loop();
+        #[cfg(not(loom))]
+        {
+            for _ in 0..1 << self.spin_count {
+                crate::sync::spin_loop();
+            }
         }
     }
 
@@ -42,7 +45,7 @@ impl BackOff {
             self.spin_loop();
         } else {
             #[cfg(feature = "std")]
-            std::thread::yield_now();
+            crate::sync::yield_now();
 
             #[cfg(not(feature = "std"))]
             self.spin_loop();

@@ -2,19 +2,18 @@
 //! Provides `CondVar` type that can be used to wait for state change
 //!
 
-use core::{
-    ptr::null_mut,
-    sync::atomic::{AtomicBool, Ordering},
-};
-
 use crate::{
     backoff::BackOff,
+    merge_ordering,
     park::{DefaultPark, Park, Unpark},
     state_ptr::{AtomicPtrState, PtrState, State},
+    sync::{AtomicBool, Ordering},
 };
 
 #[cfg(feature = "std")]
-pub type StdCondVar = CondVar<std::thread::Thread>;
+pub type StdCondVar = CondVar<crate::sync::Thread>;
+
+pub type YieldCondVar = CondVar<crate::park::UnparkYield>;
 
 #[repr(align(256))]
 struct CondVarNode<T> {
@@ -53,14 +52,25 @@ impl<T> CondVar<T> {
     pub const STATE_MASK: usize = <PtrState<CondVarNode<T>>>::STATE_MASK;
 
     /// Constant-initialized `CondVar` with zero state.
-    pub const ZERO: Self = CondVar {
-        atomic: AtomicPtrState::NULL_ZERO,
-    };
+    #[cfg(loom)]
+    pub fn zero() -> Self {
+        CondVar {
+            atomic: AtomicPtrState::null_zero(),
+        }
+    }
+
+    /// Constant-initialized `CondVar` with zero state.
+    #[cfg(not(loom))]
+    pub const fn zero() -> Self {
+        CondVar {
+            atomic: AtomicPtrState::null_zero(),
+        }
+    }
 
     #[inline(always)]
-    pub const fn new(state: u8) -> Self {
+    pub fn new(state: u8) -> Self {
         CondVar {
-            atomic: AtomicPtrState::new_null(State::new_truncated(state as usize)),
+            atomic: AtomicPtrState::null_state(State::new_truncated(state as usize)),
         }
     }
 
@@ -83,8 +93,8 @@ impl<T> CondVar<T> {
         let new_state = State::new_truncated(new_state as usize);
         self.atomic
             .compare_exchange(
-                PtrState::new_null(old_state),
-                PtrState::new_null(new_state),
+                PtrState::null_state(old_state),
+                PtrState::null_state(new_state),
                 update,
                 Ordering::Relaxed,
             )
@@ -132,7 +142,7 @@ where
         update: Ordering,
         mut f: impl FnMut(u8) -> CondVarUpdateOrWait,
     ) -> Result<u8, u8> {
-        let mut cur = self.atomic.load(load);
+        let mut cur = self.atomic.load(merge_ordering(load, Ordering::Acquire));
         let mut backoff = BackOff::new();
 
         loop {
@@ -152,11 +162,16 @@ where
                         //     PtrState::new(next, State::new_truncated(new_state as usize))
                         // }
                         CondVarWake::One | CondVarWake::All => {
-                            PtrState::new_null(State::new_truncated(new_state as usize))
+                            PtrState::null_state(State::new_truncated(new_state as usize))
                         }
                     };
 
-                    let result = self.atomic.compare_exchange_weak(cur, new, update, load);
+                    let result = self.atomic.compare_exchange_weak(
+                        cur,
+                        new,
+                        update,
+                        merge_ordering(load, Ordering::Acquire),
+                    );
 
                     match result {
                         Ok(_) => {
@@ -167,15 +182,20 @@ where
                                 // TODO: Fix ABA problem.
                                 // CondVarWake::One => {
                                 //     if let Some(node_ref) = unsafe { node.as_ref() } {
-                                //         node_ref.ready.store(true, update);
-                                //         node_ref.thread.unpark();
+                                //         let unpark = node_ref.unpark.clone();
+                                //         let ready = &node_ref.ready;
+                                //         node = node_ref.next;
+                                //         ready.store(true, Ordering::Release);
+                                //         unpark.unpark();
                                 //     }
                                 // }
                                 CondVarWake::One | CondVarWake::All => {
                                     while let Some(node_ref) = unsafe { node.as_ref() } {
-                                        node_ref.ready.store(true, Ordering::Release);
-                                        node_ref.unpark.unpark();
+                                        let unpark = node_ref.unpark.clone();
+                                        let ready = &node_ref.ready;
                                         node = node_ref.next;
+                                        ready.store(true, Ordering::Release);
+                                        unpark.unpark();
                                     }
                                 }
                             }
@@ -193,14 +213,11 @@ where
 
                     if backoff.should_block() {
                         // After few loops we should park the thread.
-                        let mut node = CondVarNode {
+                        let node = CondVarNode {
                             unpark: park.unpark_token(),
-                            next: null_mut(),
+                            next: cur.ptr(),
                             ready: AtomicBool::new(false),
                         };
-
-                        let root = cur.ptr();
-                        node.next = root;
 
                         {
                             let node = &node; // Sharing is valid now.
@@ -208,8 +225,8 @@ where
                             match self.atomic.compare_exchange_weak(
                                 cur,
                                 new,
-                                Ordering::Relaxed,
-                                load,
+                                Ordering::Release,
+                                merge_ordering(load, Ordering::Acquire),
                             ) {
                                 Ok(_) => {
                                     while !node.ready.load(Ordering::Acquire) {
@@ -217,7 +234,7 @@ where
                                     }
 
                                     // Load the state again.
-                                    cur = self.atomic.load(load);
+                                    cur = self.atomic.load(merge_ordering(load, Ordering::Acquire));
                                 }
                                 Err(new) => {
                                     // State changed. Retry.
@@ -225,14 +242,13 @@ where
                                 }
                             }
                         }
-                        continue;
+                    } else {
+                        // Perform blocking back-off.
+                        backoff.blocking_wait();
+
+                        // Load the state again.
+                        cur = self.atomic.load(merge_ordering(load, Ordering::Acquire));
                     }
-
-                    // Perform blocking back-off.
-                    backoff.blocking_wait();
-
-                    // Load the state again.
-                    cur = self.atomic.load(load);
                 }
                 CondVarUpdateOrWait::Break => {
                     // Break the loop immediately.
@@ -254,8 +270,7 @@ where
         update: Ordering,
         mut f: impl FnMut(u8) -> Option<u8>,
     ) -> Result<u8, u8> {
-        let mut cur = self.atomic.load(load);
-        let mut backoff = BackOff::new();
+        let mut cur = self.atomic.load(merge_ordering(load, Ordering::Acquire));
 
         loop {
             match f(cur.state().value() as u8) {
@@ -274,11 +289,16 @@ where
                         //     PtrState::new(next, State::new_truncated(new_state as usize))
                         // }
                         CondVarWake::One | CondVarWake::All => {
-                            PtrState::new_null(State::new_truncated(new_state as usize))
+                            PtrState::null_state(State::new_truncated(new_state as usize))
                         }
                     };
 
-                    let result = self.atomic.compare_exchange_weak(cur, new, update, load);
+                    let result = self.atomic.compare_exchange_weak(
+                        cur,
+                        new,
+                        update,
+                        merge_ordering(load, Ordering::Acquire),
+                    );
 
                     match result {
                         Ok(_) => {
@@ -289,22 +309,26 @@ where
                                 // TODO: Fix ABA problem.
                                 // CondVarWake::One => {
                                 //     if let Some(node_ref) = unsafe { node.as_ref() } {
-                                //         node_ref.ready.store(true, update);
-                                //         node_ref.thread.unpark();
+                                //         let unpark = node_ref.unpark.clone();
+                                //         let ready = &node_ref.ready;
+                                //         node = node_ref.next;
+                                //         ready.store(true, Ordering::Release);
+                                //         unpark.unpark();
                                 //     }
                                 // }
                                 CondVarWake::One | CondVarWake::All => {
                                     while let Some(node_ref) = unsafe { node.as_ref() } {
-                                        node_ref.ready.store(true, Ordering::Release);
-                                        node_ref.unpark.unpark();
+                                        let unpark = node_ref.unpark.clone();
+                                        let ready = &node_ref.ready;
                                         node = node_ref.next;
+                                        ready.store(true, Ordering::Release);
+                                        unpark.unpark();
                                     }
                                 }
                             }
                             return Ok(cur.state().value() as u8);
                         }
                         Err(new) => {
-                            backoff.lock_free_wait(); // State changed. Retry after lock-free back-off.
                             cur = new;
                         }
                     }
@@ -370,19 +394,18 @@ where
             // CondVarWake::One => self.update(CondVarWake::One, update, |_| new_state),
             CondVarWake::One | CondVarWake::All => {
                 let cur = self.atomic.swap(
-                    PtrState::new_null(State::new_truncated(new_state as usize)),
-                    update,
+                    PtrState::null_state(State::new_truncated(new_state as usize)),
+                    merge_ordering(update, Ordering::Acquire),
                 );
 
                 let mut node = cur.ptr();
 
                 while let Some(node_ref) = unsafe { node.as_ref() } {
-                    node_ref.ready.store(true, Ordering::Release);
-
-                    // Unpark strictly after setting the `ready` flag.
-                    node_ref.unpark.unpark();
-
+                    let unpark = node_ref.unpark.clone();
+                    let ready = &node_ref.ready;
                     node = node_ref.next;
+                    ready.store(true, Ordering::Release);
+                    unpark.unpark();
                 }
 
                 cur.state().value() as u8
@@ -498,5 +521,65 @@ where
     #[inline]
     pub fn wait_for(&self, load: Ordering, target: u8) {
         self.wait_for_park(T::default_park(), load, target)
+    }
+}
+
+#[cfg(loom)]
+#[test]
+fn loom_test_condvar() {
+    loom::model(|| {
+        let condvar = loom::sync::Arc::new(StdCondVar::new(0u8));
+        let (tx, rx) = loom::sync::mpsc::channel();
+
+        let mut threads = Vec::new();
+        for i in 0..1 {
+            let tx = tx.clone();
+            let condvar = condvar.clone();
+            let thread = loom::thread::spawn(move || {
+                condvar.wait(Ordering::Relaxed, |state| state == i * 2 + 1);
+                condvar.set(CondVarWake::One, Ordering::Relaxed, i * 2 + 2);
+                tx.send(i).unwrap();
+            });
+            threads.push(thread);
+        }
+
+        for i in 0..1 {
+            condvar.set(CondVarWake::One, Ordering::Relaxed, i * 2 + 1);
+            condvar.wait(Ordering::Relaxed, |state| state == i * 2 + 2);
+            assert_eq!(rx.recv().unwrap(), i);
+        }
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    });
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn test_condvar() {
+    let condvar = std::sync::Arc::new(StdCondVar::new(0u8));
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let mut threads = Vec::new();
+    for i in 0..16 {
+        let tx = tx.clone();
+        let condvar = condvar.clone();
+        let thread = std::thread::spawn(move || {
+            condvar.wait(Ordering::Relaxed, |state| state == i * 2 + 1);
+            condvar.set(CondVarWake::One, Ordering::Relaxed, i * 2 + 2);
+            tx.send(i).unwrap();
+        });
+        threads.push(thread);
+    }
+
+    for i in 0..16 {
+        condvar.set(CondVarWake::One, Ordering::Relaxed, i * 2 + 1);
+        condvar.wait(Ordering::Relaxed, |state| state == i * 2 + 2);
+        assert_eq!(rx.recv().unwrap(), i);
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
     }
 }

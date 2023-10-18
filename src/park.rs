@@ -1,15 +1,14 @@
 //! This module abstracts over the park-unpark mechanism.
 
-#[cfg(feature = "std")]
-use std::thread::{current, Thread};
+use crate::sync::{current, Thread};
 
 /// Generic unpark mechanism.
 /// With `std` enabled `std::thread::Thread` implements this trait.
-pub trait Unpark {
+pub trait Unpark: Clone {
     fn unpark(&self);
 }
 
-/// Generic unpark mechanism.
+/// Generic unpark mechanism that can be default-constructed.
 /// With `std` enabled `std::thread::Thread` implements this trait.
 pub trait DefaultPark: Unpark + Sized {
     type Park: Park<Self>;
@@ -34,9 +33,26 @@ impl DefaultPark for Thread {
     }
 }
 
+/// Generic parking mechanism.
+///
+/// # Usage
+///
+/// Call `unpark_token` to get a token that can be used to unpark this thread.
+/// Place where another token can find it to unpark this thread.
+/// Call `park` to block the current thread until it is unparked.
+///
+/// With `"std"` feature enabled `CurrentThread` implement this trait with `Thread` as unpark token.
+///
+/// `ParkYield` implements this trait with `UnparkYield` as unpark token.
+/// It yields the current thread when `park` is called instead of blocking it.
+/// This behavior is valid since spurious wakeups are allowed.
 pub trait Park<T: Unpark> {
-    fn park(&self);
+    /// Returns a token that can be used to unpark this thread.
     fn unpark_token(&self) -> T;
+
+    /// Blocks the current thread until it is unparked using
+    /// unpark token returned by `unpark_token` previously called from this thread.
+    fn park(&self);
 }
 
 #[cfg(feature = "std")]
@@ -46,7 +62,7 @@ pub struct CurrentThread;
 impl Park<Thread> for CurrentThread {
     #[inline(always)]
     fn park(&self) {
-        std::thread::park();
+        crate::sync::park();
     }
 
     #[inline(always)]
@@ -55,27 +71,28 @@ impl Park<Thread> for CurrentThread {
     }
 }
 
-pub struct UnparkNoop;
+#[derive(Clone, Copy)]
+pub struct UnparkYield;
 
-impl Unpark for UnparkNoop {
+impl Unpark for UnparkYield {
     #[inline(always)]
     fn unpark(&self) {}
 }
 
-pub struct ParkUnparkYield;
+pub struct ParkYield;
 
-impl Park<UnparkNoop> for ParkUnparkYield {
+impl Park<UnparkYield> for ParkYield {
     #[inline(always)]
     fn park(&self) {
         #[cfg(feature = "std")]
-        std::thread::yield_now();
+        crate::sync::yield_now();
 
         #[cfg(not(feature = "std"))]
-        core::hint::spin_loop();
+        crate::sync::spin_loop();
     }
 
     #[inline(always)]
-    fn unpark_token(&self) -> UnparkNoop {
-        UnparkNoop
+    fn unpark_token(&self) -> UnparkYield {
+        UnparkYield
     }
 }
