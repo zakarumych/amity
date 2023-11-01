@@ -2,16 +2,17 @@
 //! Provides `CondVar` type that can be used to wait for state change
 //!
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::{
     backoff::BackOff,
     merge_ordering,
     park::{DefaultPark, Park, Unpark},
     state_ptr::{AtomicPtrState, PtrState, State},
-    sync::{AtomicBool, Ordering},
 };
 
 #[cfg(feature = "std")]
-pub type StdCondVar = CondVar<crate::sync::Thread>;
+pub type StdCondVar = CondVar<std::thread::Thread>;
 
 pub type YieldCondVar = CondVar<crate::park::UnparkYield>;
 
@@ -52,15 +53,6 @@ impl<T> CondVar<T> {
     pub const STATE_MASK: usize = <PtrState<CondVarNode<T>>>::STATE_MASK;
 
     /// Constant-initialized `CondVar` with zero state.
-    #[cfg(loom)]
-    pub fn zero() -> Self {
-        CondVar {
-            atomic: AtomicPtrState::null_zero(),
-        }
-    }
-
-    /// Constant-initialized `CondVar` with zero state.
-    #[cfg(not(loom))]
     pub const fn zero() -> Self {
         CondVar {
             atomic: AtomicPtrState::null_zero(),
@@ -259,11 +251,72 @@ where
     }
 
     /// Simplified version of `update_wait_break` that
+    /// never breaks.
+    /// It either updates the state when `f` returns `Some` or
+    /// waits for the state to change when `f` returns `None`.
+    #[inline(always)]
+    pub fn update_wait_park(
+        &self,
+        park: impl Park<T>,
+        wake: CondVarWake,
+        load: Ordering,
+        update: Ordering,
+        mut f: impl FnMut(u8) -> Option<u8>,
+    ) -> u8 {
+        let result =
+            self.update_wait_break_park(park, wake, load, update, |state| match f(state) {
+                Some(state) => CondVarUpdateOrWait::Update(state),
+                None => CondVarUpdateOrWait::Wait,
+            });
+        match result {
+            Ok(state) => state,
+            Err(_) => unreachable!("Break variant is not used"),
+        }
+    }
+
+    /// Simplified version of `update_wait_break` that
+    /// never updates the state.
+    /// It waits for the state to change,
+    /// until `stop` returns `true` for current state.
+    #[inline]
+    pub fn wait_park(
+        &self,
+        park: impl Park<T>,
+        load: Ordering,
+        mut stop: impl FnMut(u8) -> bool,
+    ) -> u8 {
+        let result = self.update_wait_break_park(
+            park,
+            CondVarWake::None,
+            load,
+            Ordering::Relaxed,
+            |state| {
+                if stop(state) {
+                    CondVarUpdateOrWait::Break
+                } else {
+                    CondVarUpdateOrWait::Wait
+                }
+            },
+        );
+
+        match result {
+            Ok(_) => unreachable!("Update variant is not used"),
+            Err(state) => state,
+        }
+    }
+
+    /// Waits until the state is equal to `target`.
+    #[inline]
+    pub fn wait_for_park(&self, park: impl Park<T>, load: Ordering, target: u8) {
+        self.wait_park(park, load, |state| state == target);
+    }
+
+    /// Simplified version of `update_wait_break` that
     /// never waits.
     /// It either updates the state when `f` returns `Some` or
     /// breaks when `f` returns `None`.
     #[inline(always)]
-    pub fn update_break(
+    fn update_break_wake(
         &self,
         wake: CondVarWake,
         load: Ordering,
@@ -278,9 +331,7 @@ where
                     // Update the state
 
                     let new = match wake {
-                        CondVarWake::None => {
-                            cur.with_state(State::new_truncated(new_state as usize))
-                        }
+                        CondVarWake::None => unreachable!(),
                         // TODO: Fix ABA problem.
                         // CondVarWake::One => {
                         //     let cur_ptr = cur.ptr();
@@ -342,26 +393,20 @@ where
     }
 
     /// Simplified version of `update_wait_break` that
-    /// never breaks.
+    /// never waits.
     /// It either updates the state when `f` returns `Some` or
-    /// waits for the state to change when `f` returns `None`.
+    /// breaks when `f` returns `None`.
     #[inline(always)]
-    pub fn update_wait_park(
+    pub fn update_break(
         &self,
-        park: impl Park<T>,
         wake: CondVarWake,
         load: Ordering,
         update: Ordering,
-        mut f: impl FnMut(u8) -> Option<u8>,
-    ) -> u8 {
-        let result =
-            self.update_wait_break_park(park, wake, load, update, |state| match f(state) {
-                Some(state) => CondVarUpdateOrWait::Update(state),
-                None => CondVarUpdateOrWait::Wait,
-            });
-        match result {
-            Ok(state) => state,
-            Err(_) => unreachable!("Break variant is not used"),
+        f: impl FnMut(u8) -> Option<u8>,
+    ) -> Result<u8, u8> {
+        match wake {
+            CondVarWake::None => self.update_break_no_wake(load, update, f),
+            _ => self.update_break_wake(wake, load, update, f),
         }
     }
 
@@ -387,9 +432,7 @@ where
     #[inline]
     pub fn set(&self, wake: CondVarWake, update: Ordering, new_state: u8) -> u8 {
         match wake {
-            CondVarWake::None => {
-                self.update(CondVarWake::None, Ordering::Relaxed, update, |_| new_state)
-            }
+            CondVarWake::None => self.update_no_wake(Ordering::Relaxed, update, |_| new_state),
             // TODO: Fix ABA problem.
             // CondVarWake::One => self.update(CondVarWake::One, update, |_| new_state),
             CondVarWake::One | CondVarWake::All => {
@@ -412,42 +455,73 @@ where
             }
         }
     }
+}
 
+impl<T> CondVar<T> {
     /// Simplified version of `update_wait_break` that
-    /// never updates the state.
-    /// It waits for the state to change,
-    /// until `stop` returns `true` for current state.
-    #[inline]
-    pub fn wait_park(
+    /// never waits.
+    /// It either updates the state when `f` returns `Some` or
+    /// breaks when `f` returns `None`.
+    #[inline(always)]
+    pub fn update_break_no_wake(
         &self,
-        park: impl Park<T>,
         load: Ordering,
-        mut stop: impl FnMut(u8) -> bool,
-    ) -> u8 {
-        let result = self.update_wait_break_park(
-            park,
-            CondVarWake::None,
-            load,
-            Ordering::Relaxed,
-            |state| {
-                if stop(state) {
-                    CondVarUpdateOrWait::Break
-                } else {
-                    CondVarUpdateOrWait::Wait
-                }
-            },
-        );
+        update: Ordering,
+        mut f: impl FnMut(u8) -> Option<u8>,
+    ) -> Result<u8, u8> {
+        let mut cur = self.atomic.load(merge_ordering(load, Ordering::Acquire));
 
-        match result {
-            Ok(_) => unreachable!("Update variant is not used"),
-            Err(state) => state,
+        loop {
+            match f(cur.state().value() as u8) {
+                Some(new_state) => {
+                    // Update the state
+                    let new = cur.with_state(State::new_truncated(new_state as usize));
+
+                    let result = self.atomic.compare_exchange_weak(
+                        cur,
+                        new,
+                        update,
+                        merge_ordering(load, Ordering::Acquire),
+                    );
+
+                    match result {
+                        Ok(_) => {
+                            return Ok(cur.state().value() as u8);
+                        }
+                        Err(new) => {
+                            cur = new;
+                        }
+                    }
+                }
+                None => {
+                    // Break the loop immediately.
+                    return Err(cur.state().value() as u8);
+                }
+            }
         }
     }
 
-    /// Waits until the state is equal to `target`.
+    /// Simplified version of `update_wait_break` that
+    /// always updates the state.
+    #[inline(always)]
+    pub fn update_no_wake(
+        &self,
+        load: Ordering,
+        update: Ordering,
+        mut f: impl FnMut(u8) -> u8,
+    ) -> u8 {
+        let result = self.update_break_no_wake(load, update, |state| Some(f(state)));
+        match result {
+            Ok(state) => state,
+            Err(_) => unreachable!("Break variant is not used"),
+        }
+    }
+
+    /// Simplified version of `update_wait_break` that
+    /// always set pre-defined `new_state`.
     #[inline]
-    pub fn wait_for_park(&self, park: impl Park<T>, load: Ordering, target: u8) {
-        self.wait_park(park, load, |state| state == target);
+    pub fn set_no_wake(&self, update: Ordering, new_state: u8) -> u8 {
+        self.update_no_wake(Ordering::Relaxed, update, |_| new_state)
     }
 }
 
@@ -522,37 +596,6 @@ where
     pub fn wait_for(&self, load: Ordering, target: u8) {
         self.wait_for_park(T::default_park(), load, target)
     }
-}
-
-#[cfg(loom)]
-#[test]
-fn loom_test_condvar() {
-    loom::model(|| {
-        let condvar = loom::sync::Arc::new(StdCondVar::new(0u8));
-        let (tx, rx) = loom::sync::mpsc::channel();
-
-        let mut threads = Vec::new();
-        for i in 0..1 {
-            let tx = tx.clone();
-            let condvar = condvar.clone();
-            let thread = loom::thread::spawn(move || {
-                condvar.wait(Ordering::Relaxed, |state| state == i * 2 + 1);
-                condvar.set(CondVarWake::One, Ordering::Relaxed, i * 2 + 2);
-                tx.send(i).unwrap();
-            });
-            threads.push(thread);
-        }
-
-        for i in 0..1 {
-            condvar.set(CondVarWake::One, Ordering::Relaxed, i * 2 + 1);
-            condvar.wait(Ordering::Relaxed, |state| state == i * 2 + 2);
-            assert_eq!(rx.recv().unwrap(), i);
-        }
-
-        for thread in threads {
-            thread.join().unwrap();
-        }
-    });
 }
 
 #[cfg(feature = "std")]

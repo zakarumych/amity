@@ -8,17 +8,16 @@
 //! Exclusive reference allows to receive messages from single thread.
 
 use core::{
-    mem::{replace, size_of, MaybeUninit},
-    ptr::{copy_nonoverlapping, drop_in_place},
-    slice::from_raw_parts_mut,
+    cell::UnsafeCell,
+    mem::{replace, swap},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
+use lock_api::RawRwLock;
+
 use crate::{
-    capacity_overflow,
-    sync::{
-        read_atomic, read_init_cell, with_atomic, write_atomic, write_cell, AtomicU64, Ordering,
-        RwLock, UnsafeCell,
-    },
+    defer,
+    ring_buffer::{self, ring_index, RingBuffer},
 };
 
 /// Implements ring-buffer data structure.
@@ -29,90 +28,51 @@ use crate::{
 /// Reading values always requires exclusive borrow.
 ///
 /// Thus it doesn't require any internal synchronization primitives.
-pub struct FlipRingBuffer<T> {
-    array: Box<[UnsafeCell<MaybeUninit<T>>]>,
-    head: usize,
+pub struct FlipBuffer<T> {
+    buffer: RingBuffer<UnsafeCell<T>>,
     // u64 is used to allow incrementing without overflow.
+    // Contains number of elements pushed via `try_push`.
     tail: AtomicU64,
 }
 
-unsafe impl<T> Sync for FlipRingBuffer<T> where T: Send {}
-unsafe impl<T> Send for FlipRingBuffer<T> where T: Send {}
+unsafe impl<T> Sync for FlipBuffer<T> where T: Send {}
+unsafe impl<T> Send for FlipBuffer<T> where T: Send {}
 
-impl<T> FlipRingBuffer<T> {
+impl<T> FlipBuffer<T> {
     /// Create new ring buffer.
     pub fn new() -> Self {
-        // This causes box len to be usize::MAX if T size is 0.
-        let array = Vec::new().into_boxed_slice();
-
-        FlipRingBuffer {
-            array,
-            head: 0,
+        FlipBuffer {
+            buffer: RingBuffer::new(),
             tail: AtomicU64::new(0),
         }
     }
 
     /// Create new ring buffer.
     pub fn with_capacity(cap: usize) -> Self {
-        let array = (0..cap)
-            .map(|_| UnsafeCell::new(MaybeUninit::<T>::uninit()))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-
-        FlipRingBuffer {
-            array,
-            head: 0,
+        FlipBuffer {
+            buffer: RingBuffer::with_capacity(cap),
             tail: AtomicU64::new(0),
         }
     }
 
-    /// Returns content of the buffer as pair of slices.
-    pub fn as_mut_slices(&mut self) -> (&mut [T], &mut [T]) {
-        let tail = self.clamp_tail();
+    /// Flushes tail written by `try_push` to the ring-buffer.
+    fn flush_tail(&mut self) {
+        let tail = replace(self.tail.get_mut(), 0);
 
-        let front_len = tail.min(self.array.len() - self.head);
-        let back_len = tail - front_len;
-        unsafe {
-            // Cast `*mut UnsafeCell<MaybeUninit<T>>` to `*mut T` is valid.
-            let ptr: *mut T = self.array.as_mut_ptr().cast::<T>();
-            let front_ptr = ptr.add(self.head);
-
-            let front = from_raw_parts_mut(front_ptr, front_len);
-            let back = from_raw_parts_mut(ptr, back_len);
-
-            (front, back)
+        match usize::try_from(tail) {
+            Ok(tail) if tail <= self.buffer.capacity() - self.buffer.len() => unsafe {
+                self.buffer.set_len(self.buffer.len() + tail);
+            },
+            _ => unsafe {
+                self.buffer.set_len(self.buffer.capacity());
+            },
         }
     }
 
     /// Clears the buffer, removing all values.
     pub fn clear(&mut self) {
-        let (front, back) = self.as_mut_slices();
-        let front = front as *mut [T];
-        let back = back as *mut [T];
-
-        self.head = 0;
-        self.tail = AtomicU64::new(0);
-
-        unsafe {
-            let _back_dropped = Dropper(&mut *back);
-            drop_in_place(front);
-        }
-    }
-
-    /// Clamps the tail to the capacity.
-    /// When tail grows larget then capacity no more values are pushed.
-    /// All operations with mulable access clamp tail to capacity before using it.
-    fn clamp_tail(&mut self) -> usize {
-        with_atomic(&mut self.tail, |tail| {
-            match usize::try_from(*tail) {
-                Ok(tail) if tail <= self.array.len() => tail,
-                _ => {
-                    // Cap the tail at capacity.
-                    *tail = self.array.len() as u64;
-                    self.array.len()
-                }
-            }
-        })
+        self.flush_tail();
+        self.buffer.clear();
     }
 
     /// Attempts to push value to the queue.
@@ -122,13 +82,18 @@ impl<T> FlipRingBuffer<T> {
         // Acquire index to write to.
         let tail = self.tail.fetch_add(1, Ordering::Acquire);
         match usize::try_from(tail) {
-            Ok(tail) if tail < self.array.len() => {
+            Ok(tail) if tail < self.buffer.capacity() - self.buffer.len() => {
                 // Queue is not full.
-                let idx = deque_index(self.head, tail, self.array.len());
+                let idx = ring_index(
+                    self.buffer.head() + self.buffer.len(),
+                    tail,
+                    self.buffer.capacity(),
+                );
 
                 // Safety: We have exclusive access to the queue at this index.
                 unsafe {
-                    write_cell(self.array.get_unchecked(idx), MaybeUninit::new(value));
+                    let slot = self.buffer.as_ptr().add(idx);
+                    UnsafeCell::raw_get(slot).write(value);
                 }
                 Ok(())
             }
@@ -143,73 +108,16 @@ impl<T> FlipRingBuffer<T> {
     ///
     /// If at full capacity this will grow the queue.
     pub fn push(&mut self, value: T) {
-        match usize::try_from(read_atomic(&mut self.tail)) {
-            Ok(tail) if tail < self.array.len() => {
-                // Queue is not full.
-                let idx = deque_index(self.head, tail, self.array.len());
-
-                // Safety: We have exclusive access to the queue at this index.
-                unsafe {
-                    write_cell(self.array.get_unchecked(idx), MaybeUninit::new(value));
-                }
-            }
-            _ => {
-                // Queue is full.
-                // Grow the queue.
-                let new_cap = new_cap::<T>(self.array.len());
-
-                // Create new array.
-                let mut new_array = (0..new_cap)
-                    .map(|_| UnsafeCell::new(MaybeUninit::<T>::uninit()))
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice();
-
-                unsafe {
-                    copy_nonoverlapping(
-                        self.array.as_ptr().add(self.head),
-                        new_array.as_mut_ptr(),
-                        self.array.len() - self.head,
-                    );
-                    copy_nonoverlapping(
-                        self.array.as_ptr(),
-                        new_array.as_mut_ptr().add(self.array.len() - self.head),
-                        self.head,
-                    );
-
-                    write_cell(
-                        new_array.get_unchecked(self.array.len()),
-                        MaybeUninit::new(value),
-                    );
-                }
-
-                self.head = 0;
-                write_atomic(&mut self.tail, self.array.len() as u64 + 1);
-                let _ = replace(&mut self.array, new_array);
-            }
-        }
+        self.flush_tail();
+        self.buffer.push(UnsafeCell::new(value));
     }
 
     /// Pop value from the queue.
     ///
     /// This requires exclusive borrow.
     pub fn pop(&mut self) -> Option<T> {
-        let tail = self.clamp_tail();
-        if tail == 0 {
-            // Queue is empty.
-            return None;
-        }
-
-        // Safety: head index never gets greater than or equal to array length.
-        // If tail > 0 the head index was initialized with value.
-        let value = unsafe {
-            debug_assert!(self.head < self.array.len());
-            read_init_cell(self.array.get_unchecked_mut(self.head))
-        };
-
-        self.head = (self.head + 1) % self.array.len();
-        with_atomic(&mut self.tail, |tail| *tail -= 1);
-
-        Some(value)
+        self.flush_tail();
+        self.buffer.pop().map(UnsafeCell::into_inner)
     }
 
     /// Returns iterator over values in the queue.
@@ -218,11 +126,50 @@ impl<T> FlipRingBuffer<T> {
     ///
     /// This iterator will consume all values in the queue even if dropped before it is finished.
     pub fn drain(&mut self) -> Drain<'_, T> {
-        let tail = self.clamp_tail();
+        self.flush_tail();
         Drain {
-            ring_buffer: self,
-            tail,
+            inner: self.buffer.drain(),
         }
+    }
+
+    pub fn swap_buffer(&mut self, ring: &mut RingBuffer<T>) {
+        self.flush_tail();
+        swap(ring.as_unsafe_cell_mut(), &mut self.buffer);
+    }
+}
+
+pub struct Drain<'a, T> {
+    inner: ring_buffer::Drain<'a, UnsafeCell<T>>,
+}
+
+impl<T> Iterator for Drain<'_, T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<T> {
+        self.inner.next().map(UnsafeCell::into_inner)
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+
+    #[inline(always)]
+    fn count(self) -> usize {
+        self.inner.count()
+    }
+
+    #[inline(always)]
+    fn nth(&mut self, n: usize) -> Option<T> {
+        self.inner.nth(n).map(UnsafeCell::into_inner)
+    }
+}
+
+impl<T> ExactSizeIterator for Drain<'_, T> {
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.inner.len()
     }
 }
 
@@ -243,43 +190,50 @@ impl<T> FlipRingBuffer<T> {
 ///
 /// Typical use case of flip-queue is to broadcast `&FlipQueue` to multiple tasks and collect values,
 /// and then after all tasks are finished drain the queue to process collected values.
-#[repr(transparent)]
-pub struct FlipQueue<T> {
-    ring_buffer: RwLock<FlipRingBuffer<T>>,
+pub struct FlipQueue<T, L = crate::RawRwLock> {
+    flip_buffer: UnsafeCell<FlipBuffer<T>>,
+    rw_lock: L,
 }
 
-impl<T> Drop for FlipQueue<T> {
-    fn drop(&mut self) {
-        let (front, back) = self.as_mut_slices();
-        unsafe {
-            let _back_dropped = Dropper(back);
-            drop_in_place(front);
-        }
+unsafe impl<T, L> Send for FlipQueue<T, L>
+where
+    T: Send,
+    L: Send,
+{
+}
+
+unsafe impl<T, L> Sync for FlipQueue<T, L>
+where
+    T: Sync + Send,
+    L: Sync,
+{
+}
+
+impl<T, L> FlipQueue<T, L> {
+    /// Clears the queue, removing all values.
+    pub fn clear(&mut self) {
+        self.flip_buffer.get_mut().clear();
     }
 }
 
-impl<T> FlipQueue<T> {
+impl<T, L> FlipQueue<T, L>
+where
+    L: RawRwLock,
+{
     /// Create new flip queue.
     pub fn new() -> Self {
         FlipQueue {
-            ring_buffer: RwLock::new(FlipRingBuffer::new()),
+            flip_buffer: UnsafeCell::new(FlipBuffer::new()),
+            rw_lock: L::INIT,
         }
     }
 
     /// Create new flip queue.
     pub fn with_capacity(cap: usize) -> Self {
         FlipQueue {
-            ring_buffer: RwLock::new(FlipRingBuffer::with_capacity(cap)),
+            flip_buffer: UnsafeCell::new(FlipBuffer::with_capacity(cap)),
+            rw_lock: L::INIT,
         }
-    }
-
-    pub fn as_mut_slices(&mut self) -> (&mut [T], &mut [T]) {
-        self.ring_buffer.get_mut().as_mut_slices()
-    }
-
-    /// Clears the queue, removing all values.
-    pub fn clear(&mut self) {
-        self.ring_buffer.get_mut().clear();
     }
 
     /// Tries to push value to the queue.
@@ -288,7 +242,10 @@ impl<T> FlipQueue<T> {
     ///
     /// This function may block if call to `push` grows the queue.
     pub fn try_push(&self, value: T) -> Result<(), T> {
-        self.ring_buffer.read().try_push(value)
+        self.rw_lock.lock_shared();
+        let _defer = defer(|| unsafe { self.rw_lock.unlock_shared() });
+        // Safety: Shared lock acquired.
+        unsafe { (&*self.flip_buffer.get()).try_push(value) }
     }
 
     /// Push value to the queue.
@@ -305,148 +262,42 @@ impl<T> FlipQueue<T> {
     #[inline(never)]
     #[cold]
     fn push_slow(&self, value: T) {
-        let mut ring_buffer = self.ring_buffer.write();
-        ring_buffer.push(value);
+        self.rw_lock.lock_exclusive();
+        let _defer = defer(|| unsafe { self.rw_lock.unlock_exclusive() });
+        // Safety: Exclusive lock acquired.
+        unsafe {
+            let flip_buffer = &mut *self.flip_buffer.get();
+            flip_buffer.push(value);
+        }
     }
 
     pub fn pop(&mut self) -> Option<T> {
-        self.ring_buffer.get_mut().pop()
+        self.flip_buffer.get_mut().pop()
     }
 
     pub fn drain(&mut self) -> Drain<'_, T> {
-        self.ring_buffer.get_mut().drain()
-    }
-}
-
-pub struct Drain<'a, T> {
-    ring_buffer: &'a mut FlipRingBuffer<T>,
-    tail: usize,
-}
-
-impl<T> Drop for Drain<'_, T> {
-    fn drop(&mut self) {
-        self.ring_buffer.clear();
-    }
-}
-
-impl<T> Iterator for Drain<'_, T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<T> {
-        if self.tail == 0 {
-            // Queue is empty.
-            return None;
-        }
-
-        let head = self.ring_buffer.head;
-
-        self.ring_buffer.head = (self.ring_buffer.head + 1) % self.ring_buffer.array.len();
-        with_atomic(&mut self.ring_buffer.tail, |tail| *tail -= 1);
-        self.tail -= 1;
-
-        // Safety: head index never gets greater than or equal to array length.
-        // If tail > 0 the head index was initialized with value.
-        let value = unsafe {
-            debug_assert!(head < self.ring_buffer.array.len());
-            read_init_cell(self.ring_buffer.array.get_unchecked_mut(head))
-        };
-
-        Some(value)
+        self.flip_buffer.get_mut().drain()
     }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.len();
-        (len, Some(len))
-    }
-
-    fn count(self) -> usize {
-        self.len()
-    }
-
-    fn nth(&mut self, n: usize) -> Option<T> {
-        if n == 0 {
-            return self.next();
-        }
-
-        if self.tail <= n {
-            self.ring_buffer.clear();
-            // Queue is empty.
-            return None;
-        }
-
-        let head = self.ring_buffer.head;
-        let new_head = deque_index(head, n, self.ring_buffer.array.len());
-
-        self.ring_buffer.head = new_head;
-        with_atomic(&mut self.ring_buffer.tail, |tail| *tail -= n as u64);
-        self.tail -= n;
-
-        let front_len = n.min(self.ring_buffer.array.len() - head);
-        let back_len = n - front_len;
-        let (front, back) = unsafe {
-            // Cast `*mut UnsafeCell<MaybeUninit<T>>` to `*mut T` is valid.
-            let ptr: *mut T = self.ring_buffer.array.as_mut_ptr().cast::<T>();
-            let front_ptr = ptr.add(head);
-
-            let front = from_raw_parts_mut(front_ptr, front_len);
-            let back = from_raw_parts_mut(ptr, back_len);
-
-            (front, back)
-        };
-
-        debug_assert_eq!(back.len() + front.len(), n);
-        let _back_dropper = Dropper(&mut back[..new_head]);
+    pub fn drain_locking<R>(&self, f: impl FnOnce(Drain<T>) -> R) -> R {
+        self.rw_lock.lock_exclusive();
+        let _defer = defer(|| unsafe { self.rw_lock.unlock_exclusive() });
         unsafe {
-            drop_in_place(front);
+            let flip_buffer = &mut *self.flip_buffer.get();
+            f(flip_buffer.drain())
         }
-
-        self.next()
     }
-}
 
-impl<T> ExactSizeIterator for Drain<'_, T> {
-    fn len(&self) -> usize {
-        self.tail
-    }
-}
+    /// Lock the queue and swap its buffer with provided one.
+    ///
+    /// This is preferred to draining it with locking if iteration can take significant time.
+    pub fn swap_buffer(&self, ring: &mut RingBuffer<T>) {
+        self.rw_lock.lock_exclusive();
+        let _defer = defer(|| unsafe { self.rw_lock.unlock_exclusive() });
 
-#[inline(always)]
-fn deque_index(head: usize, tail: usize, cap: usize) -> usize {
-    let (sum, wrap) = head.overflowing_add(tail);
-    let sum = if wrap { dewrap(sum, cap) } else { sum };
-    sum % cap
-}
-
-#[inline(always)]
-#[cold]
-fn dewrap(sum: usize, cap: usize) -> usize {
-    (sum % cap).wrapping_sub(cap)
-}
-
-#[inline(always)]
-fn new_cap<T>(cap: usize) -> usize {
-    match cap.checked_add(cap) {
-        Some(new_cap) => new_cap.max(min_non_zero_cap::<T>()),
-        None => capacity_overflow(),
-    }
-}
-
-const fn min_non_zero_cap<T>() -> usize {
-    if size_of::<T>() == 1 {
-        8
-    } else if size_of::<T>() <= 1024 {
-        4
-    } else {
-        1
-    }
-}
-
-struct Dropper<'a, T>(&'a mut [T]);
-
-impl<'a, T> Drop for Dropper<'a, T> {
-    fn drop(&mut self) {
         unsafe {
-            drop_in_place(self.0);
+            let flip_buffer = &mut *self.flip_buffer.get();
+            flip_buffer.swap_buffer(ring);
         }
     }
 }
@@ -454,7 +305,7 @@ impl<'a, T> Drop for Dropper<'a, T> {
 #[test]
 #[cfg(feature = "std")]
 fn test_flib_buffer() {
-    let mut ring_buffer = FlipRingBuffer::with_capacity(256);
+    let mut ring_buffer = FlipBuffer::with_capacity(256);
 
     std::thread::scope(|scope| {
         let ring_buffer = &ring_buffer;

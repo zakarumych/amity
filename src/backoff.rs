@@ -1,3 +1,5 @@
+use core::hint::spin_loop;
+
 /// Waiting hint.
 /// Provides common exponential spin logic.
 /// When spin count exceeds spin limit it switches to yield when "std" feature is enabled.
@@ -22,11 +24,8 @@ impl BackOff {
 
     #[inline(always)]
     fn spin_loop(&self) {
-        #[cfg(not(loom))]
-        {
-            for _ in 0..1 << self.spin_count {
-                crate::sync::spin_loop();
-            }
+        for _ in 0..1 << self.spin_count {
+            spin_loop();
         }
     }
 
@@ -45,7 +44,7 @@ impl BackOff {
             self.spin_loop();
         } else {
             #[cfg(feature = "std")]
-            crate::sync::yield_now();
+            std::thread::yield_now();
 
             #[cfg(not(feature = "std"))]
             self.spin_loop();

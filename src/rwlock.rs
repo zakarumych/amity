@@ -1,7 +1,8 @@
+use core::sync::atomic::Ordering;
+
 use crate::{
     condvar::{CondVar, CondVarWake},
     park::{DefaultPark, Park, ParkYield, Unpark},
-    sync::Ordering,
 };
 
 const UNLOCKED: u8 = 0;
@@ -12,7 +13,7 @@ const EXCLUSIVE_LOCK: u8 = 255;
 ///
 /// It can only be used with `"std"`.
 #[cfg(feature = "std")]
-pub type StdRawRwLock = RawRwLock<crate::sync::Thread>;
+pub type StdRawRwLock = RawRwLock<std::thread::Thread>;
 
 /// Raw mutex that uses thread yielding when waiting for the lock.
 ///
@@ -23,17 +24,15 @@ pub struct RawRwLock<T> {
     condvar: CondVar<T>,
 }
 
+impl<T> Default for RawRwLock<T> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> RawRwLock<T> {
     #[inline(always)]
-    #[cfg(loom)]
-    pub fn new() -> Self {
-        RawRwLock {
-            condvar: CondVar::zero(),
-        }
-    }
-
-    #[inline(always)]
-    #[cfg(not(loom))]
     pub const fn new() -> Self {
         RawRwLock {
             condvar: CondVar::zero(),
@@ -46,16 +45,6 @@ impl<T> RawRwLock<T> {
         self.condvar.load(Ordering::Relaxed) != UNLOCKED
     }
 
-    /// Attempts to acquire the shared lock without blocking.
-    /// Returns true if the lock was acquired, false otherwise.
-    #[inline(always)]
-    pub fn try_lock_shared(&self) -> bool {
-        // If this fails then either the lock is already acquired or
-        // at least one thread is waiting for the lock.
-        self.condvar
-            .optimistic_update(Ordering::Acquire, UNLOCKED, 1)
-    }
-
     /// Attempts to acquire the exclusive lock without blocking.
     /// Returns true if the lock was acquired, false otherwise.
     #[inline(always)]
@@ -64,6 +53,18 @@ impl<T> RawRwLock<T> {
         // at least one thread is waiting for the lock.
         self.condvar
             .optimistic_update(Ordering::Acquire, UNLOCKED, EXCLUSIVE_LOCK)
+    }
+
+    /// Attempts to acquire the shared lock without blocking.
+    /// Returns true if the lock was acquired, false otherwise.
+    #[inline(always)]
+    pub fn try_lock_shared(&self) -> bool {
+        self.condvar
+            .update_break_no_wake(Ordering::Relaxed, Ordering::Acquire, |state| match state {
+                EXCLUSIVE_LOCK | MAX_SHARED => None,
+                readers => Some(readers + 1),
+            })
+            .is_ok()
     }
 }
 
@@ -181,7 +182,6 @@ where
     }
 }
 
-#[cfg(not(loom))]
 unsafe impl<T> lock_api::RawRwLock for RawRwLock<T>
 where
     T: DefaultPark,

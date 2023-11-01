@@ -1,6 +1,7 @@
 //! This module abstracts over the park-unpark mechanism.
 
-use crate::sync::{current, Thread};
+#[cfg(feature = "std")]
+use std::thread::{current, park, yield_now, Thread};
 
 /// Generic unpark mechanism.
 /// With `std` enabled `std::thread::Thread` implements this trait.
@@ -62,7 +63,7 @@ pub struct CurrentThread;
 impl Park<Thread> for CurrentThread {
     #[inline(always)]
     fn park(&self) {
-        crate::sync::park();
+        park();
     }
 
     #[inline(always)]
@@ -85,7 +86,7 @@ impl Park<UnparkYield> for ParkYield {
     #[inline(always)]
     fn park(&self) {
         #[cfg(feature = "std")]
-        crate::sync::yield_now();
+        yield_now();
 
         #[cfg(not(feature = "std"))]
         crate::sync::spin_loop();

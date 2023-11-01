@@ -6,9 +6,13 @@
 //! It preserves pointer provenance and allows to use restored pointer safely
 //! under strict-provenance rules.
 
-use core::{marker::PhantomData, mem::align_of, ptr::null_mut};
+use core::{
+    marker::PhantomData,
+    mem::align_of,
+    ptr::null_mut,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
-use crate::sync::{AtomicPtr, Ordering};
 /// State wrapper for `usize` that ensures that
 /// address bits for pointer to `T` are not set.
 #[repr(transparent)]
@@ -219,13 +223,6 @@ impl<T> AtomicPtrState<T> {
     pub const ADDR_MASK: usize = !Self::STATE_MASK;
 
     /// Null-pointer with zero state.
-    #[cfg(loom)]
-    pub fn null_zero() -> Self {
-        AtomicPtrState(AtomicPtr::new(null_mut()))
-    }
-
-    /// Null-pointer with zero state.
-    #[cfg(not(loom))]
     pub const fn null_zero() -> Self {
         AtomicPtrState(AtomicPtr::new(null_mut()))
     }
@@ -277,15 +274,6 @@ impl<T> AtomicPtrState<T> {
     /// Constructs `AtomicPtrState` from raw pointer.
     /// Any existing state bits from raw pointer are preserved.
     #[inline(always)]
-    #[cfg(loom)]
-    pub fn from_raw(ptr: *mut T) -> Self {
-        AtomicPtrState(AtomicPtr::new(ptr))
-    }
-
-    /// Constructs `AtomicPtrState` from raw pointer.
-    /// Any existing state bits from raw pointer are preserved.
-    #[inline(always)]
-    #[cfg(not(loom))]
     pub const fn from_raw(ptr: *mut T) -> Self {
         AtomicPtrState(AtomicPtr::new(ptr))
     }
