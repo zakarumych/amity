@@ -21,6 +21,9 @@ pub struct RingBuffer<T> {
     array: Box<[MaybeUninit<T>]>,
 }
 
+unsafe impl<T> Send for RingBuffer<T> where T: Send {}
+unsafe impl<T> Sync for RingBuffer<T> where T: Sync {}
+
 impl<T> Drop for RingBuffer<T> {
     fn drop(&mut self) {
         let (front, back) = self.as_mut_slices();
@@ -56,7 +59,7 @@ impl<T> RingBuffer<T> {
         let mut vec = Vec::with_capacity(cap);
         // Safety: no bytes require initialization.
         unsafe {
-            vec.set_len(cap);
+            vec.set_len(vec.capacity());
         }
         let array = vec.into_boxed_slice();
 
@@ -127,13 +130,12 @@ impl<T> RingBuffer<T> {
         } else {
             // Queue is full.
             // Grow the queue.
-            let new_cap = new_cap::<T>(self.array.len());
 
             // Create new array.
-            let mut new_vec = Vec::with_capacity(new_cap);
+            let mut new_vec = Vec::with_capacity(new_cap::<T>(self.array.len()));
             // Safety: no bytes require initialization.
             unsafe {
-                new_vec.set_len(new_cap);
+                new_vec.set_len(new_vec.capacity());
             }
             let mut new_array = new_vec.into_boxed_slice();
 

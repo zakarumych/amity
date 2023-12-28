@@ -204,9 +204,18 @@ where
 
 unsafe impl<T, L> Sync for FlipQueue<T, L>
 where
-    T: Sync + Send,
+    T: Send,
     L: Sync,
 {
+}
+
+impl<T, L> Default for FlipQueue<T, L>
+where
+    L: RawRwLock,
+{
+    fn default() -> Self {
+        FlipQueue::new()
+    }
 }
 
 impl<T, L> FlipQueue<T, L> {
