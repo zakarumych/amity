@@ -20,6 +20,7 @@ pub mod ring_buffer;
 pub mod rwlock;
 pub mod spin;
 pub mod state_ptr;
+pub mod triple;
 
 // mod sync;
 
