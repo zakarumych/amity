@@ -11,6 +11,7 @@ extern crate alloc;
 
 // pub mod arena;
 pub mod backoff;
+pub mod cache;
 pub mod condvar;
 pub mod flip_queue;
 pub mod mutex;
