@@ -332,3 +332,25 @@ fn test_flib_buffer() {
 
     assert_eq!(idx, (0..100).collect::<Vec<_>>());
 }
+
+#[test]
+#[cfg(feature = "std")]
+fn test_flib_queue() {
+    let mut queue = FlipQueue::<_>::with_capacity(1);
+
+    std::thread::scope(|scope| {
+        let queue = &queue;
+        for i in 0..10 {
+            scope.spawn(move || {
+                for j in 0..10 {
+                    queue.push(i * 10 + j);
+                }
+            });
+        }
+    });
+
+    let mut idx = queue.drain().collect::<Vec<_>>();
+    idx.sort();
+
+    assert_eq!(idx, (0..100).collect::<Vec<_>>());
+}
