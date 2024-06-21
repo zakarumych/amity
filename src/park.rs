@@ -89,7 +89,7 @@ impl Park<UnparkYield> for ParkYield {
         yield_now();
 
         #[cfg(not(feature = "std"))]
-        crate::sync::spin_loop();
+        core::hint::spin_loop();
     }
 
     #[inline(always)]

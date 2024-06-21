@@ -4,7 +4,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use core::{mem::ManuallyDrop, sync::atomic::Ordering};
+use core::sync::atomic::Ordering;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -13,16 +13,17 @@ extern crate alloc;
 pub mod backoff;
 pub mod cache;
 pub mod condvar;
-pub mod flip_queue;
 pub mod mutex;
 pub mod park;
-pub mod ring_buffer;
 pub mod rwlock;
 pub mod spin;
 pub mod state_ptr;
 pub mod triple;
 
-// mod sync;
+#[cfg(feature = "alloc")]
+pub mod flip_queue;
+#[cfg(feature = "alloc")]
+pub mod ring_buffer;
 
 pub type Spin<T> = lock_api::Mutex<spin::RawSpin, T>;
 
@@ -61,6 +62,7 @@ pub type YieldRwLock<T> = lock_api::RwLock<rwlock::YieldRawRwLock, T>;
 // One central function responsible for reporting capacity overflows. This'll
 // ensure that the code generation related to these panics is minimal as there's
 // only one location which panics rather than a bunch throughout the module.
+#[cfg(feature = "alloc")]
 fn capacity_overflow() -> ! {
     panic!("capacity overflow");
 }
@@ -89,25 +91,4 @@ fn merge_ordering(lhs: Ordering, rhs: Ordering) -> Ordering {
         (Ordering::Relaxed, Ordering::Relaxed) => Ordering::Relaxed,
         _ => unreachable!("amity does not use any other ordering"),
     }
-}
-
-struct Defer<F: FnOnce()>(ManuallyDrop<F>);
-
-impl<F> Drop for Defer<F>
-where
-    F: FnOnce(),
-{
-    fn drop(&mut self) {
-        unsafe {
-            let f = ManuallyDrop::take(&mut self.0);
-            f();
-        }
-    }
-}
-
-fn defer<F>(f: F) -> Defer<F>
-where
-    F: FnOnce(),
-{
-    Defer(ManuallyDrop::new(f))
 }

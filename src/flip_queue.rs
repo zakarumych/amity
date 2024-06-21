@@ -9,16 +9,13 @@
 
 use core::{
     cell::UnsafeCell,
-    mem::{replace, swap},
+    mem::{replace, swap, ManuallyDrop},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use lock_api::RawRwLock;
 
-use crate::{
-    defer,
-    ring_buffer::{self, ring_index, RingBuffer},
-};
+use crate::ring_buffer::{self, ring_index, RingBuffer};
 
 /// Implements ring-buffer data structure.
 ///
@@ -353,4 +350,25 @@ fn test_flib_queue() {
     idx.sort();
 
     assert_eq!(idx, (0..100).collect::<Vec<_>>());
+}
+
+struct Defer<F: FnOnce()>(ManuallyDrop<F>);
+
+impl<F> Drop for Defer<F>
+where
+    F: FnOnce(),
+{
+    fn drop(&mut self) {
+        unsafe {
+            let f = ManuallyDrop::take(&mut self.0);
+            f();
+        }
+    }
+}
+
+fn defer<F>(f: F) -> Defer<F>
+where
+    F: FnOnce(),
+{
+    Defer(ManuallyDrop::new(f))
 }

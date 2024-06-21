@@ -1,3 +1,5 @@
+use alloc::{boxed::Box, vec::Vec};
+
 use core::{
     cell::UnsafeCell,
     mem::{replace, size_of, MaybeUninit},
