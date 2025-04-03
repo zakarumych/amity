@@ -1,5 +1,24 @@
-//! Provides [`BroadSet`] and [`BroadGet`] - broadcasting channel.
+//! Provides [`Sender`] and [`Receiver`] - broadcasting channel.
 //!
+//! # Example
+//!
+//! ```rust
+//! use amity::broad::{Receiver, Sender};
+//!
+//! fn main() {
+//!     // Create a new broadcast channel with an initial value
+//!     let mut tx = Sender::new(0u32);
+//!     let mut rx = tx.receiver();
+//!
+//!     // Sender sends a new value
+//!     tx.send(42);
+//!
+//!     // Receiver receives the new value
+//!     if let Some(value) = rx.recv() {
+//!         println!("Received value: {}", value);
+//!     }
+//! }
+//! ```
 
 use alloc::{borrow::ToOwned, sync::Arc};
 
@@ -105,7 +124,7 @@ where
     ///
     /// This function is unsafe because only single producer is allowed to call this function at a time.
     ///
-    /// Use `BroadSet` for safe usage.
+    /// Use `Sender` for safe usage.
     pub unsafe fn write<R>(
         &self,
         producer: &mut u8,
@@ -130,7 +149,7 @@ where
     ///
     /// This function is unsafe because only single producer is allowed to call this function at a time.
     ///
-    /// Use `BroadSet` for safe usage.
+    /// Use `Sender` for safe usage.
     #[inline]
     pub unsafe fn send(&self, producer: &mut u8, current: &mut u64, value: T) {
         unsafe {
@@ -150,7 +169,7 @@ where
     ///
     /// This function is unsafe because only single producer is allowed to call this function at a time.
     ///
-    /// Use `BroadSet` for safe usage.
+    /// Use `Sender` for safe usage.
     #[inline]
     pub unsafe fn send_from(&self, producer: &mut u8, current: &mut u64, value: &T)
     where
@@ -173,7 +192,7 @@ where
     ///
     /// This function is unsafe because only single producer is allowed to call this function at a time.
     ///
-    /// Use `BroadSet` for safe usage.
+    /// Use `Sender` for safe usage.
     #[inline]
     pub unsafe fn send_from_borrow<U>(&self, producer: &mut u8, current: &mut u64, value: &U)
     where
@@ -207,47 +226,26 @@ where
         (broadcast, version, producer)
     }
 
-    /// Splits the broadcasting channel into a sender and receiver.
-    ///
-    /// # Safety
-    ///
-    /// This function is unsafe because it requires the caller to ensure that producer index is correct.
-    /// To safely create a sender and receiver, use [`new_split`](Self::new_split) instead.
-    pub unsafe fn split(self, version: u64, producer: u8) -> (BroadSet<T, L>, BroadGet<T, L>) {
-        let broadcast = Arc::new(self);
-        (
-            BroadSet {
-                broadcast: broadcast.clone(),
-                producer,
-                version,
-            },
-            BroadGet {
-                broadcast,
-                version: 0,
-            },
-        )
-    }
-
-    /// Creates a new broadcasting channel with the given initial value and splits it into a sender and receiver.
+    /// Converts the channel into [`Sender`].
     #[inline]
-    pub fn new_split(initial: T) -> (BroadSet<T, L>, BroadGet<T, L>)
-    where
-        T: Clone,
-    {
-        let (broadcast, version, producer) = Self::new(initial);
-        unsafe { broadcast.split(version, producer) }
+    pub fn into_sender(self, producer: u8, version: u64) -> Sender<T, L> {
+        Sender {
+            broadcast: Arc::new(self),
+            producer,
+            version,
+        }
     }
 }
 
-pub struct BroadGet<T, L = crate::DefaultRawRwLock> {
+pub struct Receiver<T, L = crate::DefaultRawRwLock> {
     broadcast: Arc<Broadcast<T, L>>,
     version: u64,
 }
 
-impl<T, L> Clone for BroadGet<T, L> {
+impl<T, L> Clone for Receiver<T, L> {
     #[inline]
     fn clone(&self) -> Self {
-        BroadGet {
+        Receiver {
             broadcast: self.broadcast.clone(),
             version: self.version,
         }
@@ -260,7 +258,7 @@ impl<T, L> Clone for BroadGet<T, L> {
     }
 }
 
-impl<T, L> BroadGet<T, L>
+impl<T, L> Receiver<T, L>
 where
     L: RawRwLock,
 {
@@ -302,16 +300,39 @@ where
     }
 }
 
-pub struct BroadSet<T, L = crate::DefaultRawRwLock> {
+pub struct Sender<T, L = crate::DefaultRawRwLock> {
     broadcast: Arc<Broadcast<T, L>>,
     producer: u8,
     version: u64,
 }
 
-impl<T, L> BroadSet<T, L>
+impl<T> Sender<T> {
+    #[inline]
+    pub fn new(initial: T) -> Self
+    where
+        T: Clone,
+    {
+        Self::with_lock(initial)
+    }
+}
+
+impl<T, L> Sender<T, L>
 where
     L: RawRwLock,
 {
+    #[inline]
+    pub fn with_lock(initial: T) -> Self
+    where
+        T: Clone,
+    {
+        let (broadcast, version, producer) = Broadcast::new(initial);
+        Sender {
+            broadcast: Arc::new(broadcast),
+            producer,
+            version,
+        }
+    }
+
     /// Send new value to all receivers.
     /// If you need to clone the value to use this method, consider using [`send_from`](Self::send_from) instead.
     #[inline]
@@ -353,62 +374,32 @@ where
                 .send_from_borrow(&mut self.producer, &mut self.version, value);
         }
     }
+
+    /// Creates a new receiver for this channel.
+    #[inline]
+    pub fn receiver(&self) -> Receiver<T, L> {
+        Receiver {
+            broadcast: self.broadcast.clone(),
+            version: 0,
+        }
+    }
 }
 
-/// Creates a new broadcasting channel with the given initial value.
-///
-/// # Example
-///
-/// ```rust
-/// use amity::broad::{broadcast, BroadGet, BroadSet};
-///
-/// fn main() {
-///     // Create a new broadcast channel with an initial value
-///     let (mut sender, mut receiver) = broadcast(0u32);
-///
-///     // Sender sends a new value
-///     sender.send(42);
-///
-///     // Receiver receives the new value
-///     assert_eq!(receiver.recv(), Some(42), "Receiver should receive 42");
-///
-///
-///     assert_eq!(receiver.recv(), None, "Receiver should not receive anything else");
-/// }
-/// ```
-#[inline]
-pub fn broadcast<T>(initial: T) -> (BroadSet<T>, BroadGet<T>)
-where
-    T: Clone,
-{
-    Broadcast::new_split(initial)
-}
-
-/// Creates a new broadcasting channel with the given initial value and a custom lock type.
-#[inline]
-pub fn broadcast_with_lock<T, L>(initial: T) -> (BroadSet<T, L>, BroadGet<T, L>)
-where
-    T: Clone,
-    L: RawRwLock,
-{
-    Broadcast::new_split(initial)
-}
-
-/// `BroadGet` paired with cached value.
+/// `Receiver` paired with cached value.
 ///
 /// This allows reading the value from cache and update when needed.
-pub struct BroadCache<T, L = crate::DefaultRawRwLock> {
-    get: BroadGet<T, L>,
+pub struct Cache<T, L = crate::DefaultRawRwLock> {
+    get: Receiver<T, L>,
     local: T,
 }
 
-impl<T, L> Clone for BroadCache<T, L>
+impl<T, L> Clone for Cache<T, L>
 where
     T: Clone,
 {
     #[inline]
     fn clone(&self) -> Self {
-        BroadCache {
+        Cache {
             get: self.get.clone(),
             local: self.local.clone(),
         }
@@ -421,16 +412,16 @@ where
     }
 }
 
-impl<T, L> BroadCache<T, L>
+impl<T, L> Cache<T, L>
 where
     L: RawRwLock,
     T: Clone,
 {
     /// Create a new broadcasting cache with the given initial value.
     #[inline]
-    pub fn new(mut get: BroadGet<T, L>) -> Self {
+    pub fn new(mut get: Receiver<T, L>) -> Self {
         let local = get.last();
-        BroadCache { get, local }
+        Cache { get, local }
     }
 
     /// Get the current value from the cache.
@@ -447,13 +438,13 @@ where
     }
 }
 
-impl<T, L> From<BroadGet<T, L>> for BroadCache<T, L>
+impl<T, L> From<Receiver<T, L>> for Cache<T, L>
 where
     L: RawRwLock,
     T: Clone,
 {
     #[inline]
-    fn from(get: BroadGet<T, L>) -> Self {
-        BroadCache::new(get)
+    fn from(get: Receiver<T, L>) -> Self {
+        Cache::new(get)
     }
 }

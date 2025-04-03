@@ -82,17 +82,18 @@ A broadcast mechanism to notify multiple listeners of events concurrently.
 Here is an example of using the `broad` module:
 
 ```rust
-use amity::broad::{broadcast, BroadGet, BroadSet};
+use amity::broad::{Receiver, Sender};
 
 fn main() {
     // Create a new broadcast channel with an initial value
-    let (mut sender, mut receiver) = broadcast(0u32);
+    let mut tx = Sender::new(0u32);
+    let mut rx = tx.receiver();
 
     // Sender sends a new value
-    sender.send(42);
+    tx.send(42);
 
     // Receiver receives the new value
-    if let Some(value) = receiver.recv() {
+    if let Some(value) = rx.recv() {
         println!("Received value: {}", value);
     }
 }
