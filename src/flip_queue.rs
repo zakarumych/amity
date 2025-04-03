@@ -187,7 +187,7 @@ impl<T> ExactSizeIterator for Drain<'_, T> {
 ///
 /// Typical use case of flip-queue is to broadcast `&FlipQueue` to multiple tasks and collect values,
 /// and then after all tasks are finished drain the queue to process collected values.
-pub struct FlipQueue<T, L = crate::RawRwLock> {
+pub struct FlipQueue<T, L = crate::DefaultRawRwLock> {
     flip_buffer: UnsafeCell<FlipBuffer<T>>,
     rw_lock: L,
 }

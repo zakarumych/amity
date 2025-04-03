@@ -1,7 +1,7 @@
 [package]
 name = "amity"
-version = "0.2.1"
-edition = "2021"
+version = "0.3.0"
+edition = "2024"
 authors = ["Zakarum <zaq.dev@icloud.com>"]
 license = "MIT OR Apache-2.0"
 documentation = "https://docs.rs/amity"
@@ -17,5 +17,13 @@ std = ["alloc"]
 alloc = []
 default = ["std"]
 
+spin = []
+ring-buffer = ["alloc"]
+flip-queue = ["spin", "ring-buffer"]
+triple = []
+broad = ["alloc", "spin", "triple"]
+
 [dependencies]
 lock_api = { version = "0.4" }
+
+parking_lot = { version = "0.12", optional = true }

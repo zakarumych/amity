@@ -24,7 +24,7 @@ use crate::cache::CachePadded;
 /// element becomes consumer's element.
 /// It also learns whether producer published element for consumption.
 ///
-/// Unlike queues, tripple buffer allows mutable access to existing elements, allowing to
+/// Unlike queues, triple buffer allows mutable access to existing elements, allowing to
 /// update their value instead of posting new instances.
 /// This can be beneficial for performance when constructing new instances is expensive
 /// and old values can be retrofitted or salvaged.
@@ -88,7 +88,7 @@ impl<T> TripleBuffer<T> {
     ///
     /// Producer may wish to not publish new element if previous one was not yet consumed.
     /// However this should not be used to "wait" for consumption
-    /// as it will turn tripple-buffer into bad mutex.
+    /// as it will turn triple-buffer into bad mutex.
     /// Instead producer may simply skip publishing new element if previous one was not consumed.
     ///
     /// Note that result may be outdated by the time it is returned.
@@ -104,7 +104,7 @@ impl<T> TripleBuffer<T> {
     ///
     /// Producer may wish to not publish new element if previous one was not yet consumed.
     /// However this should not be used to "wait" for consumption
-    /// as it will turn tripple-buffer into bad mutex.
+    /// as it will turn triple-buffer into bad mutex.
     /// Instead producer may simply skip publishing new element if previous one was not consumed.
     ///
     /// Uses mutable borrow to ensure that the value may not be outdated before method returns.
@@ -143,7 +143,7 @@ impl<T> TripleBuffer<T> {
     /// This method is unsafe because it allows to publish element to the consumer.
     /// The producer index must be correct.
     pub unsafe fn publish(&self, producer: u8) -> (u8, bool) {
-        // We Relase the element to the consumer
+        // We Release the element to the consumer
         // and Acquire current pending element for producer.
         // Thus AcqRel ordering is used.
         let flags = self.flags.swap(producer | PENDING_BIT, Ordering::AcqRel);
@@ -214,6 +214,84 @@ impl<T> TripleBuffer<T> {
     pub unsafe fn get_unchecked_mut(&self, index: usize) -> &mut T {
         unsafe { &mut *self.elements.get_unchecked(index).get() }
     }
+
+    /// Sends the value to the triple buffer.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    pub unsafe fn send(&self, producer: u8, value: T) -> (u8, bool) {
+        unsafe {
+            *self.get_unchecked_mut(producer as usize) = value;
+        }
+        unsafe { self.publish(producer) }
+    }
+
+    /// Sends the value to the triple buffer.
+    /// Clones the value from `value`.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    pub unsafe fn send_from(&self, producer: u8, value: &T) -> (u8, bool)
+    where
+        T: Clone,
+    {
+        unsafe {
+            self.get_unchecked_mut(producer as usize).clone_from(value);
+        }
+        unsafe { self.publish(producer) }
+    }
+
+    /// Sends the value to the triple buffer.
+    /// Clones the value from `value`.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    #[cfg(feature = "alloc")]
+    pub unsafe fn send_from_borrow<U>(&self, producer: u8, value: &U) -> (u8, bool)
+    where
+        U: ToOwned<Owned = T> + ?Sized,
+    {
+        unsafe {
+            value.clone_into(self.get_unchecked_mut(producer as usize));
+        }
+        unsafe { self.publish(producer) }
+    }
+
+    /// Receives the value from the triple buffer.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    pub unsafe fn recv(&self, consumer: u8) -> (u8, Option<T>)
+    where
+        T: Default,
+    {
+        let (new_consumer, produced) = unsafe { self.consume(consumer) };
+
+        if produced {
+            unsafe {
+                let value = core::mem::take(self.get_unchecked_mut(consumer as usize));
+                (new_consumer, Some(value))
+            }
+        } else {
+            (new_consumer, None)
+        }
+    }
+
+    /// Receives the value from the triple buffer.
+    /// Clones the value into `value`.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    pub unsafe fn recv_into(&self, consumer: u8, value: &mut T) -> (u8, bool)
+    where
+        T: Clone,
+    {
+        let (new_consumer, produced) = unsafe { self.consume(consumer) };
+
+        if produced {
+            unsafe {
+                value.clone_from(self.get_unchecked_mut(consumer as usize));
+                (new_consumer, true)
+            }
+        } else {
+            (new_consumer, false)
+        }
+    }
 }
 
 impl<T> TripleBuffer<Option<T>> {
@@ -226,37 +304,6 @@ impl<T> TripleBuffer<Option<T>> {
                 CachePadded(UnsafeCell::new(None)),
             ],
             flags: AtomicU8::new(FLAGS_INIT),
-        }
-    }
-}
-
-impl<T> TripleBuffer<T>
-where
-    T: Default,
-{
-    /// Sends the value to the triple buffer.
-    ///
-    /// Tripple buffer acts as a queue with 1 element capacity.
-    pub unsafe fn send(&self, producer: u8, value: T) -> (u8, bool) {
-        unsafe {
-            *self.get_unchecked_mut(producer as usize) = value;
-        }
-        unsafe { self.publish(producer) }
-    }
-
-    /// Receives the value from the triple buffer.
-    ///
-    /// Tripple buffer acts as a queue with 1 element capacity.
-    pub unsafe fn recv(&self, consumer: u8) -> (u8, Option<T>) {
-        let (new_consumer, produced) = unsafe { self.consume(consumer) };
-
-        if produced {
-            unsafe {
-                let value = core::mem::take(self.get_unchecked_mut(consumer as usize));
-                (new_consumer, Some(value))
-            }
-        } else {
-            (new_consumer, None)
         }
     }
 }
@@ -288,6 +335,23 @@ where
         unsafe { self.buffer.get_unchecked_mut(self.producer as usize) }
     }
 
+    /// Clones `value` into producer's element.
+    pub fn clone_from<U>(&mut self, value: &T)
+    where
+        T: Clone,
+    {
+        self.get_mut().clone_from(value);
+    }
+
+    /// Clones `value` into producer's element.
+    #[cfg(feature = "alloc")]
+    pub fn clone_from_borrow<U>(&mut self, value: &U)
+    where
+        U: alloc::borrow::ToOwned<Owned = T> + ?Sized,
+    {
+        value.clone_into(self.get_mut());
+    }
+
     /// Publishes producer's element and marks it as pending.
     /// Returns whether consumer consumed last published element.
     pub fn publish(&mut self) -> bool {
@@ -304,7 +368,7 @@ where
         self.buffer.consumed()
     }
 
-    /// Returns true if current producer's element was previosly consumed.
+    /// Returns true if current producer's element was previously consumed.
     /// This will return true if this element was not yet published.
     ///
     /// Producer may wish to not overwrite this element or update differently.
