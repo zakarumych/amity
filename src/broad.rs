@@ -262,6 +262,12 @@ impl<T, L> Receiver<T, L>
 where
     L: RawRwLock,
 {
+    /// Read using provided function.
+    #[inline]
+    pub fn read<R>(&mut self, f: impl FnOnce(&T, bool) -> R) -> R {
+        self.broadcast.read(&mut self.version, f);
+    }
+
     /// Receive new value if it was set since last receive.
     #[inline]
     pub fn recv(&mut self) -> Option<T>
@@ -330,6 +336,16 @@ where
             broadcast: Arc::new(broadcast),
             producer,
             version,
+        }
+    }
+
+    /// Write using provided function
+    /// and publish the updated value.
+    #[inline]
+    pub fn write<R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
+        unsafe {
+            self.broadcast
+                .write(&mut self.producer, &mut self.version, f)
         }
     }
 
