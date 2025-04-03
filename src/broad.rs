@@ -383,23 +383,29 @@ where
             version: 0,
         }
     }
+
+    /// Creates a new cached for this channel.
+    #[inline]
+    pub fn cached(&self) -> Cached<T, L> {
+        Cached::new(self.receiver())
+    }
 }
 
 /// `Receiver` paired with cached value.
 ///
 /// This allows reading the value from cache and update when needed.
-pub struct Cache<T, L = crate::DefaultRawRwLock> {
+pub struct Cached<T, L = crate::DefaultRawRwLock> {
     get: Receiver<T, L>,
     local: T,
 }
 
-impl<T, L> Clone for Cache<T, L>
+impl<T, L> Clone for Cached<T, L>
 where
     T: Clone,
 {
     #[inline]
     fn clone(&self) -> Self {
-        Cache {
+        Cached {
             get: self.get.clone(),
             local: self.local.clone(),
         }
@@ -412,7 +418,7 @@ where
     }
 }
 
-impl<T, L> Cache<T, L>
+impl<T, L> Cached<T, L>
 where
     L: RawRwLock,
     T: Clone,
@@ -421,7 +427,7 @@ where
     #[inline]
     pub fn new(mut get: Receiver<T, L>) -> Self {
         let local = get.last();
-        Cache { get, local }
+        Cached { get, local }
     }
 
     /// Get the current value from the cache.
@@ -438,13 +444,13 @@ where
     }
 }
 
-impl<T, L> From<Receiver<T, L>> for Cache<T, L>
+impl<T, L> From<Receiver<T, L>> for Cached<T, L>
 where
     L: RawRwLock,
     T: Clone,
 {
     #[inline]
     fn from(get: Receiver<T, L>) -> Self {
-        Cache::new(get)
+        Cached::new(get)
     }
 }
