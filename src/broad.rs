@@ -229,6 +229,7 @@ where
     }
 
     /// Creates a new broadcasting channel with the given initial value and splits it into a sender and receiver.
+    #[inline]
     pub fn new_split(initial: T) -> (BroadSet<T, L>, BroadGet<T, L>)
     where
         T: Clone,
@@ -375,6 +376,7 @@ where
 ///     assert_eq!(receiver.recv(), None, "Receiver should not receive anything else");
 /// }
 /// ```
+#[inline]
 pub fn broadcast<T>(initial: T) -> (BroadSet<T>, BroadGet<T>)
 where
     T: Clone,
@@ -383,6 +385,7 @@ where
 }
 
 /// Creates a new broadcasting channel with the given initial value and a custom lock type.
+#[inline]
 pub fn broadcast_with_lock<T, L>(initial: T) -> (BroadSet<T, L>, BroadGet<T, L>)
 where
     T: Clone,
@@ -391,9 +394,31 @@ where
     Broadcast::new_split(initial)
 }
 
+/// `BroadGet` paired with cached value.
+///
+/// This allows reading the value from cache and update when needed.
 pub struct BroadCache<T, L = crate::DefaultRawRwLock> {
     get: BroadGet<T, L>,
     local: T,
+}
+
+impl<T, L> Clone for BroadCache<T, L>
+where
+    T: Clone,
+{
+    #[inline]
+    fn clone(&self) -> Self {
+        BroadCache {
+            get: self.get.clone(),
+            local: self.local.clone(),
+        }
+    }
+
+    #[inline]
+    fn clone_from(&mut self, source: &Self) {
+        self.get.clone_from(&source.get);
+        self.local.clone_from(&source.local);
+    }
 }
 
 impl<T, L> BroadCache<T, L>
@@ -402,19 +427,33 @@ where
     T: Clone,
 {
     /// Create a new broadcasting cache with the given initial value.
+    #[inline]
     pub fn new(mut get: BroadGet<T, L>) -> Self {
         let local = get.last();
         BroadCache { get, local }
     }
 
     /// Get the current value from the cache.
+    #[inline]
     pub fn get(&self) -> &T {
         &self.local
     }
 
     /// Update the cache with the latest value from the broadcasting channel.
     /// Returns `true` if the value was updated, `false` otherwise.
+    #[inline]
     pub fn update(&mut self) -> bool {
         self.get.recv_into(&mut self.local)
+    }
+}
+
+impl<T, L> From<BroadGet<T, L>> for BroadCache<T, L>
+where
+    L: RawRwLock,
+    T: Clone,
+{
+    #[inline]
+    fn from(get: BroadGet<T, L>) -> Self {
+        BroadCache::new(get)
     }
 }
