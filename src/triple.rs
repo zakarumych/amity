@@ -8,9 +8,6 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-#[cfg(feature = "alloc")]
-use alloc::borrow::ToOwned;
-
 use crate::cache::CachePadded;
 
 /// Triple buffer is synchronization primitive that allows to pass values
@@ -40,6 +37,71 @@ pub struct TripleBuffer<T> {
 const FLAGS_INIT: u8 = 0b0000_0000;
 const INDEX_MASK: u8 = 0b0000_0011;
 const PENDING_BIT: u8 = 0b0000_0100;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Idx {
+    #[default]
+    Zero = 0,
+    One = 1,
+    Two = 2,
+}
+
+impl Idx {
+    /// Create triple index from `u8` value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if value is not 0, 1 or 2.
+    #[inline(always)]
+    pub fn from_bits(value: u8) -> Self {
+        match value {
+            0 => Idx::Zero,
+            1 => Idx::One,
+            2 => Idx::Two,
+            _ => panic!("Invalid index for triple buffer"),
+        }
+    }
+
+    /// Create triple index from `u8` value without checking for bounds.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that value is 0, 1 or 2.
+    #[inline(always)]
+    pub unsafe fn from_bits_unchecked(value: u8) -> Self {
+        match value {
+            0 => Idx::Zero,
+            1 => Idx::One,
+            2 => Idx::Two,
+            _ => unsafe { core::hint::unreachable_unchecked() },
+        }
+    }
+
+    /// Returns bits representation of the index.
+    #[inline(always)]
+    pub fn bits(self) -> u8 {
+        self as u8
+    }
+
+    /// Returns index as `usize`.
+    #[inline(always)]
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Return other index.
+    /// Call it again to get one another index.
+    /// Calling it 3rd time will return the same index.
+    #[inline(always)]
+    pub fn other(self) -> Self {
+        match self {
+            Idx::Zero => Idx::One,
+            Idx::One => Idx::Two,
+            Idx::Two => Idx::Zero,
+        }
+    }
+}
 
 impl<T> TripleBuffer<T> {
     pub const fn new(a: T, b: T, c: T) -> Self {
@@ -95,6 +157,7 @@ impl<T> TripleBuffer<T> {
     /// Instead producer may simply skip publishing new element if previous one was not consumed.
     ///
     /// Note that result may be outdated by the time it is returned.
+    #[must_use]
     pub fn consumed(&self) -> bool {
         let flags = self.flags.load(Ordering::Relaxed);
         let consumed = flags & PENDING_BIT == 0;
@@ -111,6 +174,7 @@ impl<T> TripleBuffer<T> {
     /// Instead producer may simply skip publishing new element if previous one was not consumed.
     ///
     /// Uses mutable borrow to ensure that the value may not be outdated before method returns.
+    #[must_use]
     pub fn consumed_mut(&mut self) -> bool {
         *self.flags.get_mut() & PENDING_BIT == 0
     }
@@ -119,17 +183,26 @@ impl<T> TripleBuffer<T> {
     /// Producer and consumer indices are two other values in set {0, 1, 2}.
     ///
     /// Note that result may be outdated by the time it is returned.
-    pub fn pending(&self) -> u8 {
+    #[must_use]
+    pub fn pending(&self) -> Idx {
         let flags = self.flags.load(Ordering::Relaxed);
-        flags & INDEX_MASK
+
+        // SAFETY: Both lower bits are never set at the same time,
+        // Making `flags & INDEX_MASK` to always be 0, 1 or 2, and never 3.
+        unsafe { Idx::from_bits_unchecked(flags & INDEX_MASK) }
     }
 
     /// Returns current pending index.
     /// Producer and consumer indices are two other values in set {0, 1, 2}.
     ///
     /// Uses mutable borrow to ensure that the value may not be outdated before method returns.
-    pub fn pending_mut(&mut self) -> u8 {
-        *self.flags.get_mut() & INDEX_MASK
+    #[must_use]
+    pub fn pending_mut(&mut self) -> Idx {
+        let flags = *self.flags.get_mut();
+
+        // SAFETY: Both lower bits are never set at the same time,
+        // Making `flags & INDEX_MASK` to always be 0, 1 or 2, and never 3.
+        unsafe { Idx::from_bits_unchecked(flags & INDEX_MASK) }
     }
 
     /// Release current producer's element and mark it as pending.
@@ -145,13 +218,16 @@ impl<T> TripleBuffer<T> {
     ///
     /// This method is unsafe because it allows to publish element to the consumer.
     /// The producer index must be correct.
-    pub unsafe fn publish(&self, producer: u8) -> (u8, bool) {
+    #[must_use]
+    pub unsafe fn publish(&self, producer: Idx) -> (Idx, bool) {
         // We Release the element to the consumer
         // and Acquire current pending element for producer.
         // Thus AcqRel ordering is used.
-        let flags = self.flags.swap(producer | PENDING_BIT, Ordering::AcqRel);
+        let flags = self
+            .flags
+            .swap(producer.bits() | PENDING_BIT, Ordering::AcqRel);
 
-        let new_producer = flags & INDEX_MASK;
+        let new_producer = unsafe { Idx::from_bits_unchecked(flags & INDEX_MASK) };
         let consumed = flags & PENDING_BIT == 0;
 
         (new_producer, consumed)
@@ -170,74 +246,101 @@ impl<T> TripleBuffer<T> {
     ///
     /// This method is unsafe because it allows to consume element from the producer.
     /// The consumer index must be correct.
-    pub unsafe fn consume(&self, consumer: u8) -> (u8, bool) {
-        let flags = self.flags.swap(consumer, Ordering::AcqRel);
+    #[must_use]
+    pub unsafe fn consume(&self, consumer: Idx) -> (Idx, bool) {
+        let flags = self.flags.swap(consumer.bits(), Ordering::AcqRel);
 
-        let new_consumer = flags & INDEX_MASK;
+        let new_consumer = unsafe { Idx::from_bits_unchecked(flags & INDEX_MASK) };
         let published = flags & PENDING_BIT != 0;
 
         (new_consumer, published)
     }
 
-    /// Returns reference to the specified element.
-    ///
-    /// Although it may be currently borrowed mutably via `get_mut` method,
-    /// this method alone may not cause mutable aliasing and thus safe.
-    pub fn get(&self, index: usize) -> &T {
-        unsafe { &*self.elements[index].0.get() }
-    }
-
-    /// Returns mutable reference to the specified element.
-    ///
-    /// It borrows the triple buffer mutably, so only one element can be accessed mutably.
-    pub fn get_mut(&mut self, index: usize) -> &mut T {
-        self.elements[index].0.get_mut()
-    }
-
     /// Returns mutable reference to the specified element.
     ///
     /// # Safety
-    ///
-    /// This method does not check if the index is in bounds.
-    /// Triple-check the index before calling this method.
-    pub unsafe fn get_unchecked(&self, index: usize) -> &T {
-        unsafe { &*self.elements.get_unchecked(index).get() }
-    }
-
-    /// Returns mutable reference to the specified element.
-    ///
-    /// # Safety
-    ///
-    /// This method does not check if the index is in bounds.
-    /// Triple-check the index before calling this method.
     ///
     /// This method returns mutable reference to element.
-    /// while only borrows the triple buffer immutably.
+    /// while only borrows the buffer immutably.
     /// Caller must ensure that one element is not accessed elsewhere while this reference is alive.
-    pub unsafe fn get_unchecked_mut(&self, index: usize) -> &mut T {
-        unsafe { &mut *self.elements.get_unchecked(index).get() }
+    #[must_use]
+    pub unsafe fn get_unchecked_mut(&self, index: Idx) -> &mut T {
+        unsafe { &mut *self.elements.get_unchecked(index.index()).get() }
     }
 
-    /// Sends the value to the triple buffer.
+    /// Returns shared reference to the specified element.
     ///
-    /// Triple buffer acts as a queue with 1 element capacity.
-    pub unsafe fn send(&self, producer: u8, value: T) -> (u8, bool) {
-        unsafe {
-            *self.get_unchecked_mut(producer as usize) = value;
-        }
-        unsafe { self.publish(producer) }
+    /// # Safety
+    ///
+    /// This method returns mutable reference to element.
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere while this reference is alive.
+    #[must_use]
+    pub unsafe fn get_unchecked(&self, index: Idx) -> &T {
+        unsafe { &*(self.elements.get_unchecked(index.index()).get() as *const T) }
     }
 
-    /// Sends the value to the triple buffer.
+    /// Sets the producer value to the triple buffer.
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses producer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    pub unsafe fn set(&self, producer: Idx, value: T) {
+        unsafe {
+            *self.get_unchecked_mut(producer) = value;
+        }
+    }
+
+    /// Sets the producer value to the triple buffer.
     /// Clones the value from `value`.
     ///
-    /// Triple buffer acts as a queue with 1 element capacity.
-    pub unsafe fn send_from(&self, producer: u8, value: &T) -> (u8, bool)
+    /// # Safety
+    ///
+    /// This method mutably accesses producer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    pub unsafe fn set_from(&self, producer: Idx, value: &T)
     where
         T: Clone,
     {
         unsafe {
-            self.get_unchecked_mut(producer as usize).clone_from(value);
+            self.get_unchecked_mut(producer).clone_from(value);
+        }
+    }
+
+    /// Sets the producer value to the triple buffer.
+    /// Clones the value from `value`.
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses producer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    #[cfg(feature = "alloc")]
+    pub unsafe fn set_from_borrow<U>(&self, producer: Idx, value: &U)
+    where
+        U: ToOwned<Owned = T> + ?Sized,
+    {
+        unsafe {
+            value.clone_into(self.get_unchecked_mut(producer));
+        }
+    }
+
+    /// Sends the value to the triple buffer.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses producer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    #[must_use]
+    pub unsafe fn send(&self, producer: Idx, value: T) -> (Idx, bool) {
+        unsafe {
+            *self.get_unchecked_mut(producer) = value;
         }
         unsafe { self.publish(producer) }
     }
@@ -246,21 +349,84 @@ impl<T> TripleBuffer<T> {
     /// Clones the value from `value`.
     ///
     /// Triple buffer acts as a queue with 1 element capacity.
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses producer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    #[must_use]
+    pub unsafe fn send_from(&self, producer: Idx, value: &T) -> (Idx, bool)
+    where
+        T: Clone,
+    {
+        unsafe {
+            self.get_unchecked_mut(producer).clone_from(value);
+        }
+        unsafe { self.publish(producer) }
+    }
+
+    /// Sends the value to the triple buffer.
+    /// Clones the value from `value`.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses producer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
     #[cfg(feature = "alloc")]
-    pub unsafe fn send_from_borrow<U>(&self, producer: u8, value: &U) -> (u8, bool)
+    pub unsafe fn send_from_borrow<U>(&self, producer: Idx, value: &U) -> (Idx, bool)
     where
         U: ToOwned<Owned = T> + ?Sized,
     {
         unsafe {
-            value.clone_into(self.get_unchecked_mut(producer as usize));
+            value.clone_into(self.get_unchecked_mut(producer));
         }
         unsafe { self.publish(producer) }
+    }
+
+    /// Reads the consumer value from the triple buffer.
+    ///
+    /// # Safety
+    ///
+    /// This method accesses consumer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    #[must_use]
+    pub unsafe fn read(&self, consumer: Idx) -> T
+    where
+        T: Clone,
+    {
+        unsafe { self.get_unchecked(consumer).clone() }
+    }
+
+    /// Reads the consumer value from the triple buffer into `value`.
+    ///
+    /// # Safety
+    ///
+    /// This method accesses consumer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    pub unsafe fn read_into(&self, consumer: Idx, value: &mut T)
+    where
+        T: Clone,
+    {
+        unsafe { value.clone_from(self.get_unchecked(consumer)) }
     }
 
     /// Receives the value from the triple buffer.
     ///
     /// Triple buffer acts as a queue with 1 element capacity.
-    pub unsafe fn recv(&self, consumer: u8) -> (u8, Option<T>)
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses consumer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed elsewhere during this call.
+    #[must_use]
+    pub unsafe fn recv(&self, consumer: Idx) -> (Idx, Option<T>)
     where
         T: Default,
     {
@@ -268,7 +434,7 @@ impl<T> TripleBuffer<T> {
 
         if produced {
             unsafe {
-                let value = core::mem::take(self.get_unchecked_mut(consumer as usize));
+                let value = core::mem::take(self.get_unchecked_mut(consumer));
                 (new_consumer, Some(value))
             }
         } else {
@@ -280,7 +446,14 @@ impl<T> TripleBuffer<T> {
     /// Clones the value into `value`.
     ///
     /// Triple buffer acts as a queue with 1 element capacity.
-    pub unsafe fn recv_into(&self, consumer: u8, value: &mut T) -> (u8, bool)
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses consumer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed elsewhere during this call.
+    #[must_use]
+    pub unsafe fn recv_into(&self, consumer: Idx, value: &mut T) -> (Idx, bool)
     where
         T: Clone,
     {
@@ -288,7 +461,7 @@ impl<T> TripleBuffer<T> {
 
         if produced {
             unsafe {
-                value.clone_from(self.get_unchecked_mut(consumer as usize));
+                value.clone_from(self.get_unchecked_mut(consumer));
                 (new_consumer, true)
             }
         } else {
@@ -313,7 +486,7 @@ impl<T> TripleBuffer<Option<T>> {
 
 pub struct TripleBufferProducer<T, B> {
     buffer: B,
-    producer: u8,
+    producer: Idx,
     last_consumed: bool,
     marker: PhantomData<fn(T) -> T>,
 }
@@ -325,48 +498,105 @@ where
     /// Returns reference to the producer's element.
     /// This method can be used to inspect the value of the element
     /// before publishing it.
+    #[must_use]
     pub fn get(&self) -> &T {
-        // Safety: producer index is kept correct.
-        unsafe { self.buffer.get_unchecked(self.producer as usize) }
+        // SAFETY: Only this instance owns the producer index.
+        unsafe { self.buffer.get_unchecked(self.producer) }
     }
 
     /// Returns mutable reference to the producer's element.
     /// This method can be used to update the value of the element
     /// before publishing it.
+    #[must_use]
     pub fn get_mut(&mut self) -> &mut T {
-        // Safety: producer index is kept correct.
-        unsafe { self.buffer.get_unchecked_mut(self.producer as usize) }
+        // SAFETY: Only this instance owns the producer index.
+        unsafe { self.buffer.get_unchecked_mut(self.producer) }
     }
 
-    /// Clones `value` into producer's element.
-    pub fn clone_from<U>(&mut self, value: &T)
+    /// Sets the producer value to the triple buffer.
+    pub unsafe fn set(&mut self, value: T) {
+        // SAFETY: Only this instance owns the producer index.
+        unsafe {
+            self.buffer.set(self.producer, value);
+        }
+    }
+
+    /// Sets the producer value to the triple buffer.
+    /// Clones the value from `value`.
+    pub unsafe fn set_from(&mut self, value: &T)
     where
         T: Clone,
     {
-        self.get_mut().clone_from(value);
+        // SAFETY: Only this instance owns the producer index.
+        unsafe {
+            self.buffer.set_from(self.producer, value);
+        }
     }
 
-    /// Clones `value` into producer's element.
+    /// Sets the producer value to the triple buffer.
+    /// Clones the value from `value`.
     #[cfg(feature = "alloc")]
-    pub fn clone_from_borrow<U>(&mut self, value: &U)
+    pub unsafe fn set_from_borrow<U>(&mut self, value: &U)
     where
-        U: alloc::borrow::ToOwned<Owned = T> + ?Sized,
+        U: ToOwned<Owned = T> + ?Sized,
     {
-        value.clone_into(self.get_mut());
+        // SAFETY: Only this instance owns the producer index.
+        unsafe {
+            self.buffer.set_from_borrow(self.producer, value);
+        }
     }
 
     /// Publishes producer's element and marks it as pending.
     /// Returns whether consumer consumed last published element.
     pub fn publish(&mut self) -> bool {
-        // Safety: producer index is kept correct.
+        // SAFETY: Only this instance owns the producer index.
         let (new_producer, consumed) = unsafe { self.buffer.publish(self.producer) };
         self.last_consumed = consumed;
         self.producer = new_producer;
         consumed
     }
 
+    /// Sets the producer value to the triple buffer.
+    pub unsafe fn send(&mut self, value: T) -> bool {
+        // SAFETY: Only this instance owns the producer index.
+        unsafe {
+            self.buffer.set(self.producer, value);
+        }
+        self.publish()
+    }
+
+    /// Sets the producer value to the triple buffer.
+    /// Clones the value from `value`.
+    pub unsafe fn send_from(&mut self, value: &T) -> bool
+    where
+        T: Clone,
+    {
+        // SAFETY: Only this instance owns the producer index.
+        unsafe {
+            self.buffer.set_from(self.producer, value);
+        }
+        self.publish()
+    }
+
+    /// Sets the producer value to the triple buffer.
+    /// Clones the value from `value`.
+    #[cfg(feature = "alloc")]
+    pub unsafe fn send_from_borrow<U>(&mut self, value: &U) -> bool
+    where
+        U: ToOwned<Owned = T> + ?Sized,
+    {
+        // SAFETY: Only this instance owns the producer index.
+        unsafe {
+            let (producer, consumed) = self.buffer.send_from_borrow(self.producer, value);
+            self.last_consumed = consumed;
+            self.producer = producer;
+            consumed
+        }
+    }
+
     /// Returns whether last published element was consumed.
     /// This will return true if no element was published yet.
+    #[must_use]
     pub fn consumed(&self) -> bool {
         self.buffer.consumed()
     }
@@ -377,6 +607,7 @@ where
     /// Producer may wish to not overwrite this element or update differently.
     ///
     /// This is the same value that was returned by last call to `publish` method.
+    #[must_use]
     pub fn last_consumed(&self) -> bool {
         self.last_consumed
     }
@@ -384,7 +615,7 @@ where
 
 pub struct TripleBufferConsumer<T, B> {
     buffer: B,
-    consumer: u8,
+    consumer: Idx,
     marker: PhantomData<fn(T) -> T>,
 }
 
@@ -394,16 +625,90 @@ where
 {
     /// Returns reference to the consumer's element.
     /// This method can be used to inspect the value of the element after consuming it.
+    #[must_use]
     pub fn get(&self) -> &T {
         // Safety: consumer index is kept correct.
-        unsafe { self.buffer.get_unchecked(self.consumer as usize) }
+        unsafe { self.buffer.get_unchecked(self.consumer) }
     }
 
     /// Returns mutable reference to the consumer's element.
     /// This method can be used to take the value of the element after consuming it.
+    #[must_use]
     pub fn get_mut(&mut self) -> &mut T {
         // Safety: consumer index is kept correct.
-        unsafe { self.buffer.get_unchecked_mut(self.consumer as usize) }
+        unsafe { self.buffer.get_unchecked_mut(self.consumer) }
+    }
+
+    /// Reads the consumer value from the triple buffer.
+    ///
+    /// # Safety
+    ///
+    /// This method accesses consumer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    #[must_use]
+    pub unsafe fn read(&self) -> T
+    where
+        T: Clone,
+    {
+        unsafe { self.buffer.read(self.consumer) }
+    }
+
+    /// Reads the consumer value from the triple buffer into `value`.
+    ///
+    /// # Safety
+    ///
+    /// This method accesses consumer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed mutably elsewhere during this call.
+    pub unsafe fn read_into(&self, value: &mut T)
+    where
+        T: Clone,
+    {
+        unsafe { self.buffer.read_into(self.consumer, value) }
+    }
+
+    /// Receives the value from the triple buffer.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses consumer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed elsewhere during this call.
+    #[must_use]
+    pub unsafe fn recv(&mut self) -> Option<T>
+    where
+        T: Default,
+    {
+        unsafe {
+            let (consumer, value) = self.buffer.recv(self.consumer);
+            self.consumer = consumer;
+            value
+        }
+    }
+
+    /// Receives the value from the triple buffer.
+    /// Clones the value into `value`.
+    ///
+    /// Triple buffer acts as a queue with 1 element capacity.
+    ///
+    /// # Safety
+    ///
+    /// This method mutably accesses consumer element
+    /// while only borrows the buffer immutably.
+    /// Caller must ensure that one element is not accessed elsewhere during this call.
+    #[must_use]
+    pub unsafe fn recv_into(&mut self, value: &mut T) -> bool
+    where
+        T: Clone,
+    {
+        unsafe {
+            let (consumer, produced) = self.buffer.recv_into(self.consumer, value);
+            self.consumer = consumer;
+            produced
+        }
     }
 
     /// Consumes next element and marks previous as pending.
@@ -415,6 +720,7 @@ where
     }
 
     /// Returns whether element was published since last consumption.
+    #[must_use]
     pub fn published(&self) -> bool {
         !self.buffer.consumed()
     }
@@ -431,17 +737,19 @@ impl<T> TripleBuffer<T> {
         TripleBufferConsumer<T, alloc::sync::Arc<Self>>,
     ) {
         let pending = self.pending_mut();
+        let producer = pending.other();
+        let consumer = producer.other();
 
         let arc = alloc::sync::Arc::new(self);
         let producer = TripleBufferProducer {
             buffer: arc.clone(),
-            producer: (pending + 1) % 3,
+            producer,
             last_consumed: true,
             marker: PhantomData,
         };
         let consumer = TripleBufferConsumer {
             buffer: arc,
-            consumer: (pending + 2) % 3,
+            consumer,
             marker: PhantomData,
         };
         (producer, consumer)
@@ -459,17 +767,23 @@ impl<T> TripleBuffer<T> {
         TripleBufferConsumer<T, &'a Self>,
     ) {
         let pending = self.pending_mut();
+        let producer = pending.other();
+        let consumer = producer.other();
+
+        debug_assert_ne!(pending, producer);
+        debug_assert_ne!(pending, consumer);
+        debug_assert_ne!(producer, consumer);
 
         let me = &*self;
         let producer = TripleBufferProducer {
             buffer: me,
-            producer: (pending + 1) % 3,
+            producer,
             last_consumed: true,
             marker: PhantomData,
         };
         let consumer = TripleBufferConsumer {
             buffer: me,
-            consumer: (pending + 2) % 3,
+            consumer,
             marker: PhantomData,
         };
         (producer, consumer)

@@ -24,11 +24,11 @@ use alloc::{borrow::ToOwned, sync::Arc};
 
 use lock_api::{RawRwLock, RwLock};
 
-use crate::triple::TripleBuffer;
+use crate::triple::{Idx, TripleBuffer};
 
 pub struct Broadcast<T, L = crate::DefaultRawRwLock> {
     buffer: TripleBuffer<(T, u64)>,
-    consumer: RwLock<L, u8>,
+    consumer: RwLock<L, Idx>,
 }
 
 impl<T, L> Broadcast<T, L>
@@ -47,7 +47,7 @@ where
                 *write = new_consumer;
             }
 
-            let (value, version) = unsafe { self.buffer.get_unchecked(*write as usize) };
+            let (value, version) = unsafe { self.buffer.get_unchecked(*write) };
 
             if *version > *current {
                 *current = *version;
@@ -57,7 +57,7 @@ where
             }
         } else {
             let read = self.consumer.read();
-            let (value, version) = unsafe { self.buffer.get_unchecked(*read as usize) };
+            let (value, version) = unsafe { self.buffer.get_unchecked(*read) };
 
             if *version > *current {
                 *current = *version;
@@ -127,11 +127,11 @@ where
     /// Use `Sender` for safe usage.
     pub unsafe fn write<R>(
         &self,
-        producer: &mut u8,
+        producer: &mut Idx,
         current: &mut u64,
         f: impl FnOnce(&mut T) -> R,
     ) -> R {
-        let (buffer, version) = unsafe { self.buffer.get_unchecked_mut(*producer as usize) };
+        let (buffer, version) = unsafe { self.buffer.get_unchecked_mut(*producer) };
 
         let r = f(buffer);
 
@@ -151,7 +151,7 @@ where
     ///
     /// Use `Sender` for safe usage.
     #[inline]
-    pub unsafe fn send(&self, producer: &mut u8, current: &mut u64, value: T) {
+    pub unsafe fn send(&self, producer: &mut Idx, current: &mut u64, value: T) {
         unsafe {
             self.write(producer, current, move |buffer| {
                 *buffer = value;
@@ -171,7 +171,7 @@ where
     ///
     /// Use `Sender` for safe usage.
     #[inline]
-    pub unsafe fn send_from(&self, producer: &mut u8, current: &mut u64, value: &T)
+    pub unsafe fn send_from(&self, producer: &mut Idx, current: &mut u64, value: &T)
     where
         T: Clone,
     {
@@ -194,7 +194,7 @@ where
     ///
     /// Use `Sender` for safe usage.
     #[inline]
-    pub unsafe fn send_from_borrow<U>(&self, producer: &mut u8, current: &mut u64, value: &U)
+    pub unsafe fn send_from_borrow<U>(&self, producer: &mut Idx, current: &mut u64, value: &U)
     where
         U: ToOwned<Owned = T> + ?Sized,
     {
@@ -206,12 +206,12 @@ where
     }
 
     /// Creates a new broadcasting channel with the given initial value.
-    pub fn new(initial: T) -> (Self, u64, u8)
+    pub fn new(initial: T) -> (Self, u64, Idx)
     where
         T: Clone,
     {
-        let producer = 0;
-        let consumer = 1;
+        let producer = Idx::default();
+        let consumer = producer.other();
         let version = 0;
 
         let broadcast = Broadcast {
@@ -228,7 +228,7 @@ where
 
     /// Converts the channel into [`Sender`].
     #[inline]
-    pub fn into_sender(self, producer: u8, version: u64) -> Sender<T, L> {
+    pub fn into_sender(self, producer: Idx, version: u64) -> Sender<T, L> {
         Sender {
             broadcast: Arc::new(self),
             producer,
@@ -308,7 +308,7 @@ where
 
 pub struct Sender<T, L = crate::DefaultRawRwLock> {
     broadcast: Arc<Broadcast<T, L>>,
-    producer: u8,
+    producer: Idx,
     version: u64,
 }
 
