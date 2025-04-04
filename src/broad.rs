@@ -265,7 +265,7 @@ where
     /// Read using provided function.
     #[inline]
     pub fn read<R>(&mut self, f: impl FnOnce(&T, bool) -> R) -> R {
-        self.broadcast.read(&mut self.version, f);
+        self.broadcast.read(&mut self.version, f)
     }
 
     /// Receive new value if it was set since last receive.
@@ -402,7 +402,10 @@ where
 
     /// Creates a new cached for this channel.
     #[inline]
-    pub fn cached(&self) -> Cached<T, L> {
+    pub fn cached(&self) -> Cached<T, L>
+    where
+        T: Clone,
+    {
         Cached::new(self.receiver())
     }
 }

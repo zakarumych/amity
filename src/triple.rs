@@ -8,6 +8,9 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
+#[cfg(feature = "alloc")]
+use alloc::borrow::ToOwned;
+
 use crate::cache::CachePadded;
 
 /// Triple buffer is synchronization primitive that allows to pass values
