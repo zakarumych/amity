@@ -730,6 +730,7 @@ where
 impl<T> TripleBuffer<T> {
     /// Split the triple buffer into producer and consumer.
     /// This method consumes buffer, wraps it into `Arc` and returns producer and consumer that share it.
+    #[must_use]
     pub fn split_arc(
         mut self,
     ) -> (
@@ -760,6 +761,7 @@ impl<T> TripleBuffer<T> {
     /// Split the triple buffer into producer and consumer.
     /// This method takes mutable reference to buffer and returns
     /// producer and consumer that share immutable reference with same lifetime.
+    #[must_use]
     pub fn split_mut<'a>(
         &'a mut self,
     ) -> (

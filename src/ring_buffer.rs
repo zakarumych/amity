@@ -2,7 +2,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use core::{
     cell::UnsafeCell,
-    mem::{replace, size_of, MaybeUninit},
+    mem::{MaybeUninit, replace, size_of},
     ptr::{copy_nonoverlapping, drop_in_place},
     slice::{from_raw_parts, from_raw_parts_mut},
 };
@@ -46,6 +46,7 @@ impl<T> RingBuffer<T> {
     };
 
     #[inline]
+    #[must_use]
     pub fn new() -> Self {
         if size_of::<T>() == 0 {
             // This causes box len to be usize::MAX if T size is 0.
@@ -57,6 +58,7 @@ impl<T> RingBuffer<T> {
     }
 
     #[inline]
+    #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
         let mut vec = Vec::with_capacity(cap);
         // Safety: no bytes require initialization.
@@ -73,6 +75,7 @@ impl<T> RingBuffer<T> {
     }
 
     #[inline]
+    #[must_use]
     pub fn as_slices(&self) -> (&[T], &[T]) {
         let front_len = self.len.min(self.array.len() - self.head);
         let back_len = self.len - front_len;
@@ -191,6 +194,7 @@ impl<T> RingBuffer<T> {
     }
 
     #[inline(always)]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

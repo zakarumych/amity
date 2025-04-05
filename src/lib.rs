@@ -1,8 +1,7 @@
-//!
-//! Amity crate.
-//!
-
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
+#![deny(clippy::pedantic)]
+#![allow(clippy::inline_always)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -25,9 +24,6 @@ pub mod spin;
 
 #[cfg(feature = "triple")]
 pub mod triple;
-
-#[cfg(feature = "spin")]
-pub type Spin<T> = lock_api::Mutex<spin::RawSpin, T>;
 
 #[cfg(all(feature = "spin", not(feature = "parking_lot")))]
 #[allow(dead_code)]

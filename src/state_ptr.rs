@@ -44,12 +44,14 @@ impl<T> State<T> {
     pub const STATE_MASK: usize = <PtrState<T>>::STATE_MASK;
 
     /// Zero state.
+    #[must_use]
     pub const fn zero() -> Self {
         State(0, PhantomData)
     }
 
     /// Returns state value.
     #[inline(always)]
+    #[must_use]
     pub const fn value(&self) -> usize {
         self.0
     }
@@ -57,6 +59,7 @@ impl<T> State<T> {
     /// Creates new `State` from `usize`.
     /// If any of address bits are set then `None` is returned.
     #[inline(always)]
+    #[must_use]
     pub const fn new(value: usize) -> Option<Self> {
         if value & Self::STATE_MASK == value {
             Some(State(value, PhantomData))
@@ -68,6 +71,7 @@ impl<T> State<T> {
     /// Creates new `State` from `usize`.
     /// Value is truncated to fit into `STATE_BITS`.
     #[inline(always)]
+    #[must_use]
     pub const fn new_truncated(value: usize) -> Self {
         State(value & Self::STATE_MASK, PhantomData)
     }
@@ -116,6 +120,7 @@ impl<T> PtrState<T> {
     pub const ADDR_MASK: usize = !Self::STATE_MASK;
 
     /// Null-pointer with zero state.
+    #[must_use]
     pub const fn null_zero() -> Self {
         PtrState(null_mut())
     }
@@ -123,6 +128,7 @@ impl<T> PtrState<T> {
     /// Creates new `PtrState` with null pointer and state.
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
+    #[must_use]
     pub fn null_state(state: State<T>) -> Self {
         PtrState::new(null_mut(), state)
     }
@@ -142,14 +148,14 @@ impl<T> PtrState<T> {
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn new_ref(ptr: &T, state: State<T>) -> Self {
-        PtrState::new(ptr as *const _ as *mut _, state)
+        PtrState::new(std::ptr::from_ref(ptr).cast_mut(), state)
     }
 
     /// Creates new `PtrState` from mutable reference and state.
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn new_mut(ptr: &mut T, state: State<T>) -> Self {
-        PtrState::new(ptr as *mut _, state)
+        PtrState::new(std::ptr::from_mut(ptr), state)
     }
 
     /// Creates new `PtrState` with pointer and zero state.
@@ -171,6 +177,7 @@ impl<T> PtrState<T> {
 
     /// Returns raw pointer value with both address and state bits.
     #[inline(always)]
+    #[must_use]
     pub const fn raw(&self) -> *mut T {
         self.0
     }
@@ -178,6 +185,7 @@ impl<T> PtrState<T> {
     /// Creates new `PtrState` with pointer from this value and new state.
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
+    #[must_use]
     pub fn with_state(&self, state: State<T>) -> Self {
         PtrState::new(self.ptr(), state)
     }
@@ -188,17 +196,20 @@ impl<T> PtrState<T> {
     ///
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline(always)]
+    #[must_use]
     pub fn with_ptr(&self, ptr: *mut T) -> Self {
         PtrState::new(ptr, self.state())
     }
 
     /// Returns pointer from this value.
+    #[must_use]
     pub fn ptr(&self) -> *mut T {
         let state = (self.0 as usize) & Self::STATE_MASK;
         self.0.cast::<u8>().wrapping_sub(state).cast()
     }
 
     /// Returns state from this value.
+    #[must_use]
     pub fn state(&self) -> State<T> {
         let state = (self.0 as usize) & Self::STATE_MASK;
         State(state, PhantomData)
@@ -223,6 +234,7 @@ impl<T> AtomicPtrState<T> {
     pub const ADDR_MASK: usize = !Self::STATE_MASK;
 
     /// Null-pointer with zero state.
+    #[must_use]
     pub const fn null_zero() -> Self {
         AtomicPtrState(AtomicPtr::new(null_mut()))
     }
@@ -230,6 +242,7 @@ impl<T> AtomicPtrState<T> {
     /// Creates new `AtomicPtrState` with null pointer and state.
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
+    #[must_use]
     pub fn null_state(state: State<T>) -> Self {
         AtomicPtrState::new(null_mut(), state)
     }
@@ -251,14 +264,14 @@ impl<T> AtomicPtrState<T> {
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn new_ref(ptr: &T, state: State<T>) -> Self {
-        AtomicPtrState::new(ptr as *const _ as *mut _, state)
+        AtomicPtrState::new(std::ptr::from_ref(ptr).cast_mut(), state)
     }
 
     /// Creates new `AtomicPtrState` from mutable reference and state.
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn new_mut(ptr: &mut T, state: State<T>) -> Self {
-        AtomicPtrState::new(ptr as *mut _, state)
+        AtomicPtrState::new(std::ptr::from_mut(ptr), state)
     }
 
     /// Creates new `AtomicPtrState` with pointer and zero state.
@@ -280,6 +293,7 @@ impl<T> AtomicPtrState<T> {
 
     /// Creates new `AtomicPtrState` from merged pointer-state value.
     #[inline(always)]
+    #[must_use]
     pub fn from_ptr_state(ptr_state: PtrState<T>) -> Self {
         AtomicPtrState(AtomicPtr::new(ptr_state.raw()))
     }
@@ -291,7 +305,7 @@ impl<T> AtomicPtrState<T> {
 
     #[inline(always)]
     pub fn store(&self, value: PtrState<T>, order: Ordering) {
-        self.0.store(value.0, order)
+        self.0.store(value.0, order);
     }
 
     #[inline(always)]
@@ -299,6 +313,19 @@ impl<T> AtomicPtrState<T> {
         PtrState(self.0.swap(value.0, order))
     }
 
+    /// Stores the `new` value into the pointer-state if the current value is the same as the `current` value.
+    ///
+    /// The return value is a result indicating whether the new value was written and containing
+    /// the previous value. On success this value is guaranteed to be equal to `current`.
+    ///
+    /// `compare_exchange` takes two [`Ordering`] arguments to describe the memory
+    /// ordering of this operation. `success` describes the required ordering for the
+    /// read-modify-write operation that takes place if the comparison with `current` succeeds.
+    /// `failure` describes the required ordering for the load operation that takes place when
+    /// the comparison fails. Using [`Acquire`] as success ordering makes the store part
+    /// of this operation [`Relaxed`], and using [`Release`] makes the successful load
+    /// [`Relaxed`]. The failure ordering can only be [`SeqCst`], [`Acquire`] or [`Relaxed`].
+    #[allow(clippy::missing_errors_doc)]
     #[inline(always)]
     pub fn compare_exchange(
         &self,
@@ -313,6 +340,21 @@ impl<T> AtomicPtrState<T> {
             .map_err(PtrState)
     }
 
+    /// Stores the `new` value into the pointer-state if the current value is the same as the `current` value.
+    ///
+    /// Unlike [`AtomicPtrState::compare_exchange`], this function is allowed to spuriously fail even when the
+    /// comparison succeeds, which can result in more efficient code on some platforms. The
+    /// return value is a result indicating whether the new value was written and containing the
+    /// previous value.
+    ///
+    /// `compare_exchange_weak` takes two [`Ordering`] arguments to describe the memory
+    /// ordering of this operation. `success` describes the required ordering for the
+    /// read-modify-write operation that takes place if the comparison with `current` succeeds.
+    /// `failure` describes the required ordering for the load operation that takes place when
+    /// the comparison fails. Using [`Acquire`] as success ordering makes the store part
+    /// of this operation [`Relaxed`], and using [`Release`] makes the successful load
+    /// [`Relaxed`]. The failure ordering can only be [`SeqCst`], [`Acquire`] or [`Relaxed`].
+    #[allow(clippy::missing_errors_doc)]
     #[inline(always)]
     pub fn compare_exchange_weak(
         &self,

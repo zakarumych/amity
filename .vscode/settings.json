@@ -2,6 +2,11 @@
     "editor.formatOnSave": true,
     "rust-analyzer.cargo.noDefaultFeatures": true,
     "rust-analyzer.cargo.features": [
-        "alloc"
+        "std",
+        "broad",
+        "ring-buffer",
+        "flip-queue",
+        "spin",
+        "triple",
     ],
 }

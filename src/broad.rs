@@ -70,6 +70,7 @@ where
 
     /// Receive new value if it was set since last receive.
     #[inline]
+    #[must_use]
     pub fn recv(&self, current: &mut u64) -> Option<T>
     where
         T: Clone,
@@ -101,6 +102,7 @@ where
 
     /// Returns last set value.
     #[inline]
+    #[must_use]
     pub fn last(&self, current: &mut u64) -> T
     where
         T: Clone,
@@ -206,6 +208,7 @@ where
     }
 
     /// Creates a new broadcasting channel with the given initial value.
+    #[must_use]
     pub fn new(initial: T) -> (Self, u64, Idx)
     where
         T: Clone,
@@ -228,6 +231,7 @@ where
 
     /// Converts the channel into [`Sender`].
     #[inline]
+    #[must_use]
     pub fn into_sender(self, producer: Idx, version: u64) -> Sender<T, L> {
         Sender {
             broadcast: Arc::new(self),
@@ -314,6 +318,7 @@ pub struct Sender<T, L = crate::DefaultRawRwLock> {
 
 impl<T> Sender<T> {
     #[inline]
+    #[must_use]
     pub fn new(initial: T) -> Self
     where
         T: Clone,
@@ -327,6 +332,7 @@ where
     L: RawRwLock,
 {
     #[inline]
+    #[must_use]
     pub fn with_lock(initial: T) -> Self
     where
         T: Clone,
@@ -393,6 +399,7 @@ where
 
     /// Creates a new receiver for this channel.
     #[inline]
+    #[must_use]
     pub fn receiver(&self) -> Receiver<T, L> {
         Receiver {
             broadcast: self.broadcast.clone(),
@@ -402,6 +409,7 @@ where
 
     /// Creates a new cached for this channel.
     #[inline]
+    #[must_use]
     pub fn cached(&self) -> Cached<T, L>
     where
         T: Clone,
@@ -444,6 +452,7 @@ where
 {
     /// Create a new broadcasting cache with the given initial value.
     #[inline]
+    #[must_use]
     pub fn new(mut get: Receiver<T, L>) -> Self {
         let local = get.last();
         Cached { get, local }
@@ -451,6 +460,7 @@ where
 
     /// Get the current value from the cache.
     #[inline]
+    #[must_use]
     pub fn get(&self) -> &T {
         &self.local
     }

@@ -1,6 +1,6 @@
 [package]
 name = "amity"
-version = "0.4.4"
+version = "0.5.0"
 edition = "2024"
 authors = ["Zakarum <zaq.dev@icloud.com>"]
 license = "MIT OR Apache-2.0"
@@ -27,3 +27,6 @@ broad = ["alloc", "spin", "triple"]
 lock_api = { version = "0.4" }
 
 parking_lot = { version = "0.12", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true

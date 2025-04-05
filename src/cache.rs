@@ -43,7 +43,7 @@ use core::ops::{Deref, DerefMut};
 /// when two or more cores are modifying different variables that reside on the same cache line.
 ///
 /// Cache lines are assumed to be N bytes long, where N depends on the architecture:
-/// - x86_64, aarch64 and powerpc: 64 bytes, but N is 128 as prefetching pulls pairs of cache lines on some CPUs.
+/// - `x86_64`, aarch64 and powerpc: 64 bytes, but N is 128 as prefetching pulls pairs of cache lines on some CPUs.
 /// - arm, mips, mips32r6, mips64, mips64r6, sparc and hexagon: 32 bytes
 /// - m68k: 16 bytes
 /// - s390x: 256 bytes
@@ -100,7 +100,7 @@ pub struct CacheAlign;
 /// when two or more cores are modifying different variables that reside on the same cache line.
 ///
 /// Cache lines are assumed to be N bytes long, where N depends on the architecture:
-/// - x86_64, aarch64 and powerpc: 64 bytes, but N is 128 as prefetching pulls pairs of cache lines on some CPUs.
+/// - `x86_64`, aarch64 and powerpc: 64 bytes, but N is 128 as prefetching pulls pairs of cache lines on some CPUs.
 /// - arm, mips, mips32r6, mips64, mips64r6, sparc and hexagon: 32 bytes
 /// - m68k: 16 bytes
 /// - s390x: 256 bytes

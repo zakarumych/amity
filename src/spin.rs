@@ -11,16 +11,19 @@ pub struct RawSpin {
 }
 
 impl RawSpin {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             lock: AtomicBool::new(false),
         }
     }
 
+    #[must_use]
     pub fn is_locked(&self) -> bool {
         self.lock.load(Ordering::Relaxed)
     }
 
+    #[must_use]
     pub fn try_lock(&self) -> bool {
         !self.lock.fetch_or(true, Ordering::Acquire)
     }
@@ -70,7 +73,7 @@ unsafe impl lock_api::RawMutex for RawSpin {
 ///
 /// It consists of a single atomic integer that is used to track the number of shared locks and the exclusive lock.
 /// The lock is not totally fair.
-/// Pending exclusive locks block new shared locks from being acquired.
+/// Pending exclusive lock block new shared locks from being acquired.
 /// But in case of constant stream of exclusive locks, some of them may block indefinitely, so are shared locks.
 pub struct RawRwSpin {
     lock: AtomicUsize,
@@ -89,6 +92,7 @@ const EXCLUSIVE_PENDING: usize = usize::MAX / 4 + 1;
 const EXCLUSIVE_LOCKED: usize = usize::MAX / 2 + 1;
 
 impl RawRwSpin {
+    #[must_use]
     pub const fn new() -> Self {
         RawRwSpin {
             lock: AtomicUsize::new(0),
@@ -98,6 +102,7 @@ impl RawRwSpin {
     /// Returns true if currently locked exclusively.
     ///
     /// Use this only as a hint since state may change even before the method returns.
+    #[must_use]
     pub fn is_locked_exclusive(&self) -> bool {
         self.lock.load(Ordering::Relaxed) >= EXCLUSIVE_LOCKED
     }
@@ -105,6 +110,7 @@ impl RawRwSpin {
     /// Returns true if currently locked exclusively or shared.
     ///
     /// Use this only as a hint since state may change even before the method returns.
+    #[must_use]
     pub fn is_locked(&self) -> bool {
         self.lock.load(Ordering::Relaxed) > 0
     }
@@ -113,6 +119,7 @@ impl RawRwSpin {
     ///
     /// Returns true if acquired successfully, false otherwise.
     /// If acquired, caller is responsible for calling [`unlock_shared`](Self::unlock_shared) to release the shared lock.
+    #[must_use]
     pub fn try_lock_shared(&self) -> bool {
         let count = self.lock.fetch_add(1, Ordering::Acquire);
 
@@ -135,48 +142,29 @@ impl RawRwSpin {
     ///
     /// Returns true if acquired successfully, false otherwise.
     /// If acquired, caller is responsible for calling [`unlock_shared`](Self::unlock_shared) to release the shared lock.
+    #[must_use]
     pub fn lock_shared_while(&self, cond: impl FnMut() -> bool) -> bool {
         let mut count = self.lock.fetch_add(1, Ordering::Acquire);
-        let mut cond = cond;
         let mut backoff = BackOff::new();
-        let mut in_queue = true;
+        let mut cond = cond;
 
-        loop {
-            if in_queue {
-                #[cfg(debug_assertions)]
-                locks_count_check(count, || {
-                    // Unlock if shared locks count is too high.
-                    self.lock.fetch_sub(1, Ordering::Relaxed);
-                });
+        #[cfg(debug_assertions)]
+        locks_count_check(count, || {
+            // Unlock if shared locks count is too high.
+            self.lock.fetch_sub(1, Ordering::Relaxed);
+        });
 
-                if count < EXCLUSIVE_PENDING {
-                    // Successfully acquired the lock.
-                    return true;
-                }
+        if count < EXCLUSIVE_PENDING {
+            // Successfully acquired the lock.
+            return true;
+        }
 
-                if !cond() {
-                    // The closure returned false, so we won't wait for the lock to be released.
-                    self.lock.fetch_sub(1, Ordering::Relaxed);
-                    return false;
-                }
+        // Only once, give a room for exclusive lock to be acquired.
+        if count < EXCLUSIVE_LOCKED {
+            // Exclusive lock was enqueued, so give a room for it to be acquired.
+            count = self.lock.fetch_sub(1, Ordering::Relaxed);
 
-                if count < EXCLUSIVE_LOCKED {
-                    // Exclusive lock was enqueued, so give a room for it to be acquired.
-                    count = self.lock.fetch_sub(1, Ordering::Relaxed);
-
-                    // Wait off queue until exclusive lock is acquired.
-                    in_queue = false;
-
-                    // Wait a bit.
-                    backoff.wait();
-                    continue;
-                }
-
-                // Wait a bit.
-                backoff.wait();
-
-                count = self.lock.load(Ordering::Acquire);
-            } else {
+            loop {
                 #[cfg(debug_assertions)]
                 locks_count_check(count, || {});
 
@@ -185,18 +173,45 @@ impl RawRwSpin {
                     return false;
                 }
 
+                // No exclusive lock waiters, so we can acquire the lock.
                 if count >= EXCLUSIVE_LOCKED || count < EXCLUSIVE_PENDING {
                     // Get back to queue.
-                    count = self.lock.fetch_add(1, Ordering::Relaxed);
-                    in_queue = true;
-                    continue;
+                    count = self.lock.fetch_add(1, Ordering::Acquire);
+                    break;
                 }
 
                 // Wait a bit.
                 backoff.wait();
 
-                count = self.lock.load(Ordering::Acquire);
+                count = self.lock.load(Ordering::Relaxed);
             }
+        }
+
+        loop {
+            #[cfg(debug_assertions)]
+            locks_count_check(count, || {
+                // Unlock if shared locks count is too high.
+                self.lock.fetch_sub(1, Ordering::Relaxed);
+            });
+
+            // Here we can go ahead of exclusive lock waiter.
+            // If one was present before call to this method
+            // it was let ahead of us in branch before this loop.
+            if count < EXCLUSIVE_LOCKED {
+                // Successfully acquired the lock.
+                return true;
+            }
+
+            if !cond() {
+                // The closure returned false, so we won't wait for the lock to be released.
+                self.lock.fetch_sub(1, Ordering::Relaxed);
+                return false;
+            }
+
+            // Wait a bit.
+            backoff.wait();
+
+            count = self.lock.load(Ordering::Acquire);
         }
     }
 
@@ -215,6 +230,7 @@ impl RawRwSpin {
     }
 
     /// Performs a single attempt to acquire an exclusive lock.
+    #[must_use]
     pub fn try_lock_exclusive(&self) -> bool {
         self.lock
             .compare_exchange(0, EXCLUSIVE_LOCKED, Ordering::Acquire, Ordering::Relaxed)
@@ -225,6 +241,7 @@ impl RawRwSpin {
     ///
     /// Returns true if acquired successfully, false otherwise.
     /// If acquired, caller is responsible for calling [`unlock_exclusive`](Self::unlock_exclusive) to release the exclusive lock.
+    #[must_use]
     pub fn lock_exclusive_while(&self, cond: impl FnMut() -> bool) -> bool {
         let mut cond = cond;
         let mut backoff = BackOff::new();
@@ -351,6 +368,12 @@ unsafe impl lock_api::RawRwLock for RawRwSpin {
         self.is_locked_exclusive()
     }
 }
+
+/// Mutex type that uses [`RawSpin`](RawSpin).
+pub type Spin<T> = lock_api::Mutex<RawSpin, T>;
+
+/// Read-write mutex type that uses [`RawRwSpin`](RawRwSpin).
+pub type RwSpin<T> = lock_api::RwLock<RawRwSpin, T>;
 
 #[cfg(debug_assertions)]
 #[inline(always)]

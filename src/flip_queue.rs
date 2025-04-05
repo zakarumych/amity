@@ -9,13 +9,13 @@
 
 use core::{
     cell::UnsafeCell,
-    mem::{replace, swap, ManuallyDrop},
+    mem::{ManuallyDrop, replace, swap},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use lock_api::RawRwLock;
 
-use crate::ring_buffer::{self, ring_index, RingBuffer};
+use crate::ring_buffer::{self, RingBuffer, ring_index};
 
 /// Implements ring-buffer data structure.
 ///
@@ -37,6 +37,7 @@ unsafe impl<T> Send for FlipBuffer<T> where T: Send {}
 
 impl<T> FlipBuffer<T> {
     /// Create new ring buffer.
+    #[must_use]
     pub fn new() -> Self {
         FlipBuffer {
             buffer: RingBuffer::new(),
@@ -45,6 +46,7 @@ impl<T> FlipBuffer<T> {
     }
 
     /// Create new ring buffer.
+    #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
         FlipBuffer {
             buffer: RingBuffer::with_capacity(cap),
@@ -135,6 +137,7 @@ impl<T> FlipBuffer<T> {
     }
 }
 
+#[must_use = "iterator does nothing unless consumed"]
 pub struct Drain<'a, T> {
     inner: ring_buffer::Drain<'a, UnsafeCell<T>>,
 }
@@ -227,6 +230,7 @@ where
     L: RawRwLock,
 {
     /// Create new flip queue.
+    #[must_use]
     pub fn new() -> Self {
         FlipQueue {
             flip_buffer: UnsafeCell::new(FlipBuffer::new()),
@@ -235,6 +239,7 @@ where
     }
 
     /// Create new flip queue.
+    #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
         FlipQueue {
             flip_buffer: UnsafeCell::new(FlipBuffer::with_capacity(cap)),
