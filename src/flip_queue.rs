@@ -72,10 +72,6 @@ impl<T> FlipBuffer<T> {
         let popped = replace(self.popped.get_mut(), 0);
         let pushed = replace(self.pushed.get_mut(), 0);
 
-        if popped == 0 && pushed == 0 {
-            return;
-        }
-
         let popped = match usize::try_from(popped) {
             Ok(popped) if popped <= len => popped,
             _ => len,
@@ -85,6 +81,10 @@ impl<T> FlipBuffer<T> {
             Ok(pushed) if pushed <= vacant => pushed,
             _ => vacant,
         };
+
+        if popped == 0 && pushed == 0 {
+            return;
+        }
 
         let new_len = len - popped + pushed;
         let new_head = ring_index(self.buffer.head(), popped, self.buffer.capacity());
@@ -341,18 +341,18 @@ where
     }
 
     pub fn pop_sync(&self) -> Option<T> {
-        {
-            let read = self.buffer.read();
+        let read = self.buffer.read();
 
-            if let Some(value) = read.pop_sync() {
-                return Some(value);
-            }
-
-            // This is just an optimization to avoid locking the queue if there were no pushed values.
-            if read.pushed.load(Ordering::Relaxed) == 0 {
-                return None;
-            }
+        if let Some(value) = read.pop_sync() {
+            return Some(value);
         }
+
+        // This is just an optimization to avoid locking the queue if there were no pushed values.
+        if read.pushed.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+
+        drop(read);
         self.pop_slow()
     }
 
