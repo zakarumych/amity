@@ -1,4 +1,4 @@
-name: test-main
+name: test-channels
 
 on:
   push:

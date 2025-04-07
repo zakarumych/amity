@@ -1,4 +1,4 @@
-name: test-main
+name: test-features
 
 on:
   push:
