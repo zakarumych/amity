@@ -2,7 +2,7 @@
 
 [![crates](https://img.shields.io/crates/v/amity.svg?style=for-the-badge&label=amity)](https://crates.io/crates/amity)
 [![docs](https://img.shields.io/badge/docs.rs-amity-66c2a5?style=for-the-badge&labelColor=555555&logoColor=white)](https://docs.rs/amity)
-[![actions](https://img.shields.io/github/actions/workflow/status/zakarumych/amity/test-features?style=for-the-badge)](https://github.com/zakarumych/amity/actions)
+[![actions](https://img.shields.io/github/actions/workflow/status/zakarumych/amity/features.yaml?style=for-the-badge)](https://github.com/zakarumych/amity/actions)
 [![MIT/Apache](https://img.shields.io/badge/license-MIT%2FApache-blue.svg?style=for-the-badge)](COPYING)
 
 Collection of concurrency algorithms.
