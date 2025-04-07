@@ -195,29 +195,29 @@ pub struct Drain<'a, T> {
 impl<T> Iterator for Drain<'_, T> {
     type Item = T;
 
-    #[inline(always)]
+    #[inline]
     fn next(&mut self) -> Option<T> {
         self.inner.next().map(UnsafeCell::into_inner)
     }
 
-    #[inline(always)]
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
     }
 
-    #[inline(always)]
+    #[inline]
     fn count(self) -> usize {
         self.inner.count()
     }
 
-    #[inline(always)]
+    #[inline]
     fn nth(&mut self, n: usize) -> Option<T> {
         self.inner.nth(n).map(UnsafeCell::into_inner)
     }
 }
 
 impl<T> ExactSizeIterator for Drain<'_, T> {
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }

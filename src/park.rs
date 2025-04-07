@@ -18,7 +18,7 @@ pub trait DefaultPark: Unpark + Sized {
 
 #[cfg(feature = "std")]
 impl Unpark for Thread {
-    #[inline(always)]
+    #[inline]
     fn unpark(&self) {
         self.unpark();
     }
@@ -28,7 +28,7 @@ impl Unpark for Thread {
 impl DefaultPark for Thread {
     type Park = CurrentThread;
 
-    #[inline(always)]
+    #[inline]
     fn default_park() -> Self::Park {
         CurrentThread
     }
@@ -61,12 +61,12 @@ pub struct CurrentThread;
 
 #[cfg(feature = "std")]
 impl Park<Thread> for CurrentThread {
-    #[inline(always)]
+    #[inline]
     fn park(&self) {
         park();
     }
 
-    #[inline(always)]
+    #[inline]
     fn unpark_token(&self) -> Thread {
         current()
     }
@@ -76,14 +76,14 @@ impl Park<Thread> for CurrentThread {
 pub struct UnparkYield;
 
 impl Unpark for UnparkYield {
-    #[inline(always)]
+    #[inline]
     fn unpark(&self) {}
 }
 
 pub struct ParkYield;
 
 impl Park<UnparkYield> for ParkYield {
-    #[inline(always)]
+    #[inline]
     fn park(&self) {
         #[cfg(feature = "std")]
         yield_now();
@@ -92,7 +92,7 @@ impl Park<UnparkYield> for ParkYield {
         core::hint::spin_loop();
     }
 
-    #[inline(always)]
+    #[inline]
     fn unpark_token(&self) -> UnparkYield {
         UnparkYield
     }

@@ -24,14 +24,14 @@ pub struct RawMutex<T> {
 }
 
 impl<T> Default for RawMutex<T> {
-    #[inline(always)]
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<T> RawMutex<T> {
-    #[inline(always)]
+    #[inline]
     pub const fn new() -> Self {
         RawMutex {
             condvar: CondVar::zero(),
@@ -39,14 +39,14 @@ impl<T> RawMutex<T> {
     }
 
     /// Returns true if the lock is acquired, false otherwise.
-    #[inline(always)]
+    #[inline]
     pub fn is_locked(&self) -> bool {
         self.condvar.load(Ordering::Relaxed) == LOCKED
     }
 
     /// Attempts to acquire the lock without blocking.
     /// Returns true if the lock was acquired, false otherwise.
-    #[inline(always)]
+    #[inline]
     pub fn try_lock(&self) -> bool {
         // If this fails then either the lock is already acquired or
         // at least one thread is waiting for the lock.
@@ -60,7 +60,7 @@ where
     T: Unpark,
 {
     /// Blocking lock that returns when the lock is acquired.
-    #[inline(always)]
+    #[inline]
     pub fn lock_park(&self, park: impl Park<T>) {
         if self
             .condvar
@@ -81,7 +81,7 @@ where
         );
     }
 
-    #[inline(always)]
+    #[inline]
     pub unsafe fn unlock(&self) {
         self.condvar.set(CondVarWake::One, Ordering::Release, 0);
     }
@@ -92,7 +92,7 @@ where
     T: DefaultPark,
 {
     /// Blocking lock that returns when the lock is acquired.
-    #[inline(always)]
+    #[inline]
     pub fn lock(&self) {
         if self
             .condvar
@@ -121,21 +121,21 @@ where
 
     const INIT: Self = Self::new();
 
-    #[inline(always)]
+    #[inline]
     fn is_locked(&self) -> bool {
         self.is_locked()
     }
 
-    #[inline(always)]
+    #[inline]
     fn try_lock(&self) -> bool {
         self.try_lock()
     }
 
-    #[inline(always)]
+    #[inline]
     fn lock(&self) {
         self.lock()
     }
 
-    #[inline(always)]
+    #[inline]
     unsafe fn unlock(&self) {}
 }

@@ -11,18 +11,18 @@ impl BackOff {
     const SPIN_THRESHOLD: usize = 7;
     const YIELD_THRESHOLD: usize = 15;
 
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         BackOff { spin_count: 0 }
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn reset(&mut self) {
         self.spin_count = 0;
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn wait(&mut self) {
         if self.spin_count < Self::SPIN_THRESHOLD {
             core::hint::spin_loop();

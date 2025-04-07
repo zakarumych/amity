@@ -56,7 +56,7 @@ impl Idx {
     /// # Panics
     ///
     /// Panics if value is not 0, 1 or 2.
-    #[inline(always)]
+    #[inline]
     pub fn from_bits(value: u8) -> Self {
         match value {
             0 => Idx::Zero,
@@ -71,7 +71,7 @@ impl Idx {
     /// # Safety
     ///
     /// The caller must ensure that value is 0, 1 or 2.
-    #[inline(always)]
+    #[inline]
     pub unsafe fn from_bits_unchecked(value: u8) -> Self {
         match value {
             0 => Idx::Zero,
@@ -82,13 +82,13 @@ impl Idx {
     }
 
     /// Returns bits representation of the index.
-    #[inline(always)]
+    #[inline]
     pub fn bits(self) -> u8 {
         self as u8
     }
 
     /// Returns index as `usize`.
-    #[inline(always)]
+    #[inline]
     pub fn index(self) -> usize {
         self as usize
     }
@@ -96,7 +96,7 @@ impl Idx {
     /// Return other index.
     /// Call it again to get one another index.
     /// Calling it 3rd time will return the same index.
-    #[inline(always)]
+    #[inline]
     pub fn other(self) -> Self {
         match self {
             Idx::Zero => Idx::One,

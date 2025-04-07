@@ -117,14 +117,14 @@ pub struct CachePadded<T>(pub T);
 impl<T> Deref for CachePadded<T> {
     type Target = T;
 
-    #[inline(always)]
+    #[inline]
     fn deref(&self) -> &T {
         &self.0
     }
 }
 
 impl<T> DerefMut for CachePadded<T> {
-    #[inline(always)]
+    #[inline]
     fn deref_mut(&mut self) -> &mut T {
         &mut self.0
     }

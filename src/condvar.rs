@@ -59,7 +59,7 @@ impl<T> CondVar<T> {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn new(state: u8) -> Self {
         CondVar {
             atomic: AtomicPtrState::null_state(State::new_truncated(state as usize)),
@@ -254,7 +254,7 @@ where
     /// never breaks.
     /// It either updates the state when `f` returns `Some` or
     /// waits for the state to change when `f` returns `None`.
-    #[inline(always)]
+    #[inline]
     pub fn update_wait_park(
         &self,
         park: impl Park<T>,
@@ -315,7 +315,7 @@ where
     /// never waits.
     /// It either updates the state when `f` returns `Some` or
     /// breaks when `f` returns `None`.
-    #[inline(always)]
+    #[inline]
     fn update_break_wake(
         &self,
         wake: CondVarWake,
@@ -396,7 +396,7 @@ where
     /// never waits.
     /// It either updates the state when `f` returns `Some` or
     /// breaks when `f` returns `None`.
-    #[inline(always)]
+    #[inline]
     pub fn update_break(
         &self,
         wake: CondVarWake,
@@ -412,7 +412,7 @@ where
 
     /// Simplified version of `update_wait_break` that
     /// always updates the state.
-    #[inline(always)]
+    #[inline]
     pub fn update(
         &self,
         wake: CondVarWake,
@@ -462,7 +462,7 @@ impl<T> CondVar<T> {
     /// never waits.
     /// It either updates the state when `f` returns `Some` or
     /// breaks when `f` returns `None`.
-    #[inline(always)]
+    #[inline]
     pub fn update_break_no_wake(
         &self,
         load: Ordering,
@@ -503,7 +503,7 @@ impl<T> CondVar<T> {
 
     /// Simplified version of `update_wait_break` that
     /// always updates the state.
-    #[inline(always)]
+    #[inline]
     pub fn update_no_wake(
         &self,
         load: Ordering,
@@ -571,7 +571,7 @@ where
     /// never breaks.
     /// It either updates the state when `f` returns `Some` or
     /// waits for the state to change when `f` returns `None`.
-    #[inline(always)]
+    #[inline]
     pub fn update_wait(
         &self,
         wake: CondVarWake,

@@ -19,7 +19,7 @@ use core::{
 pub struct State<T>(usize, PhantomData<T>);
 
 impl<T> Clone for State<T> {
-    #[inline(always)]
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -28,7 +28,7 @@ impl<T> Clone for State<T> {
 impl<T> Copy for State<T> {}
 
 impl<T> PartialEq for State<T> {
-    #[inline(always)]
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
@@ -50,7 +50,7 @@ impl<T> State<T> {
     }
 
     /// Returns state value.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub const fn value(&self) -> usize {
         self.0
@@ -58,7 +58,7 @@ impl<T> State<T> {
 
     /// Creates new `State` from `usize`.
     /// If any of address bits are set then `None` is returned.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub const fn new(value: usize) -> Option<Self> {
         if value & Self::STATE_MASK == value {
@@ -70,7 +70,7 @@ impl<T> State<T> {
 
     /// Creates new `State` from `usize`.
     /// Value is truncated to fit into `STATE_BITS`.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub const fn new_truncated(value: usize) -> Self {
         State(value & Self::STATE_MASK, PhantomData)
@@ -78,7 +78,7 @@ impl<T> State<T> {
 }
 
 impl<T> From<State<T>> for usize {
-    #[inline(always)]
+    #[inline]
     fn from(state: State<T>) -> Self {
         state.value()
     }
@@ -92,7 +92,7 @@ impl<T> From<State<T>> for usize {
 pub struct PtrState<T>(*mut T);
 
 impl<T> Clone for PtrState<T> {
-    #[inline(always)]
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -101,7 +101,7 @@ impl<T> Clone for PtrState<T> {
 impl<T> Copy for PtrState<T> {}
 
 impl<T> PartialEq for PtrState<T> {
-    #[inline(always)]
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
@@ -127,7 +127,7 @@ impl<T> PtrState<T> {
 
     /// Creates new `PtrState` with null pointer and state.
     /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn null_state(state: State<T>) -> Self {
         PtrState::new(null_mut(), state)
@@ -139,21 +139,21 @@ impl<T> PtrState<T> {
     /// # Panics
     ///
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
-    #[inline(always)]
+    #[inline]
     pub fn new(ptr: *mut T, state: State<T>) -> Self {
         PtrState(ptr.cast::<u8>().wrapping_add(state.0).cast())
     }
 
     /// Creates new `PtrState` from reference and state.
     /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
+    #[inline]
     pub fn new_ref(ptr: &T, state: State<T>) -> Self {
         PtrState::new(from_ref(ptr).cast_mut(), state)
     }
 
     /// Creates new `PtrState` from mutable reference and state.
     /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
+    #[inline]
     pub fn new_mut(ptr: &mut T, state: State<T>) -> Self {
         PtrState::new(from_mut(ptr), state)
     }
@@ -163,20 +163,20 @@ impl<T> PtrState<T> {
     /// # Panics
     ///
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
-    #[inline(always)]
+    #[inline]
     pub const fn new_zero(ptr: *mut T) -> Self {
         PtrState(ptr)
     }
 
     /// Constructs `PtrState` from raw pointer.
     /// Any existing state bits from raw pointer are preserved.
-    #[inline(always)]
+    #[inline]
     pub const fn from_raw(ptr: *mut T) -> Self {
         PtrState(ptr)
     }
 
     /// Returns raw pointer value with both address and state bits.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub const fn raw(&self) -> *mut T {
         self.0
@@ -184,7 +184,7 @@ impl<T> PtrState<T> {
 
     /// Creates new `PtrState` with pointer from this value and new state.
     /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn with_state(&self, state: State<T>) -> Self {
         PtrState::new(self.ptr(), state)
@@ -195,7 +195,7 @@ impl<T> PtrState<T> {
     /// # Panics
     ///
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn with_ptr(&self, ptr: *mut T) -> Self {
         PtrState::new(ptr, self.state())
@@ -241,7 +241,7 @@ impl<T> AtomicPtrState<T> {
 
     /// Creates new `AtomicPtrState` with null pointer and state.
     /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn null_state(state: State<T>) -> Self {
         AtomicPtrState::new(null_mut(), state)
@@ -253,7 +253,7 @@ impl<T> AtomicPtrState<T> {
     /// # Panics
     ///
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
-    #[inline(always)]
+    #[inline]
     pub fn new(ptr: *mut T, state: State<T>) -> Self {
         AtomicPtrState(AtomicPtr::new(
             ptr.cast::<u8>().wrapping_add(state.0).cast(),
@@ -262,14 +262,14 @@ impl<T> AtomicPtrState<T> {
 
     /// Creates new `AtomicPtrState` from reference and state.
     /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
+    #[inline]
     pub fn new_ref(ptr: &T, state: State<T>) -> Self {
         AtomicPtrState::new(from_ref(ptr).cast_mut(), state)
     }
 
     /// Creates new `AtomicPtrState` from mutable reference and state.
     /// State is wrapped to ensure that only lower bits may be set.
-    #[inline(always)]
+    #[inline]
     pub fn new_mut(ptr: &mut T, state: State<T>) -> Self {
         AtomicPtrState::new(from_mut(ptr), state)
     }
@@ -279,36 +279,36 @@ impl<T> AtomicPtrState<T> {
     /// # Panics
     ///
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
-    #[inline(always)]
+    #[inline]
     pub fn new_zero(ptr: *mut T) -> Self {
         AtomicPtrState(AtomicPtr::new(ptr))
     }
 
     /// Constructs `AtomicPtrState` from raw pointer.
     /// Any existing state bits from raw pointer are preserved.
-    #[inline(always)]
+    #[inline]
     pub const fn from_raw(ptr: *mut T) -> Self {
         AtomicPtrState(AtomicPtr::new(ptr))
     }
 
     /// Creates new `AtomicPtrState` from merged pointer-state value.
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn from_ptr_state(ptr_state: PtrState<T>) -> Self {
         AtomicPtrState(AtomicPtr::new(ptr_state.raw()))
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn load(&self, order: Ordering) -> PtrState<T> {
         PtrState(self.0.load(order))
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn store(&self, value: PtrState<T>, order: Ordering) {
         self.0.store(value.0, order);
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn swap(&self, value: PtrState<T>, order: Ordering) -> PtrState<T> {
         PtrState(self.0.swap(value.0, order))
     }
@@ -332,7 +332,7 @@ impl<T> AtomicPtrState<T> {
     /// [`Relaxed`]: core::sync::atomic::Ordering::Relaxed
     /// [`SeqCst`]: core::sync::atomic::Ordering::SeqCst
     #[allow(clippy::missing_errors_doc)]
-    #[inline(always)]
+    #[inline]
     pub fn compare_exchange(
         &self,
         current: PtrState<T>,
@@ -367,7 +367,7 @@ impl<T> AtomicPtrState<T> {
     /// [`Relaxed`]: core::sync::atomic::Ordering::Relaxed
     /// [`SeqCst`]: core::sync::atomic::Ordering::SeqCst
     #[allow(clippy::missing_errors_doc)]
-    #[inline(always)]
+    #[inline]
     pub fn compare_exchange_weak(
         &self,
         current: PtrState<T>,

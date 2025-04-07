@@ -48,22 +48,22 @@ unsafe impl lock_api::RawMutex for RawSpin {
 
     const INIT: Self = Self::new();
 
-    #[inline(always)]
+    #[inline]
     fn is_locked(&self) -> bool {
         self.is_locked()
     }
 
-    #[inline(always)]
+    #[inline]
     fn try_lock(&self) -> bool {
         self.try_lock()
     }
 
-    #[inline(always)]
+    #[inline]
     fn lock(&self) {
         self.lock()
     }
 
-    #[inline(always)]
+    #[inline]
     unsafe fn unlock(&self) {
         self.unlock()
     }
@@ -330,7 +330,7 @@ unsafe impl lock_api::RawRwLock for RawRwSpin {
 
     const INIT: Self = Self::new();
 
-    #[inline(always)]
+    #[inline]
     fn lock_shared(&self) {
         self.lock_shared()
     }
@@ -339,12 +339,12 @@ unsafe impl lock_api::RawRwLock for RawRwSpin {
         self.try_lock_shared()
     }
 
-    #[inline(always)]
+    #[inline]
     unsafe fn unlock_shared(&self) {
         self.unlock_shared()
     }
 
-    #[inline(always)]
+    #[inline]
     fn lock_exclusive(&self) {
         self.lock_exclusive()
     }
@@ -353,17 +353,17 @@ unsafe impl lock_api::RawRwLock for RawRwSpin {
         self.try_lock_exclusive()
     }
 
-    #[inline(always)]
+    #[inline]
     unsafe fn unlock_exclusive(&self) {
         self.unlock_exclusive()
     }
 
-    #[inline(always)]
+    #[inline]
     fn is_locked(&self) -> bool {
         self.is_locked()
     }
 
-    #[inline(always)]
+    #[inline]
     fn is_locked_exclusive(&self) -> bool {
         self.is_locked_exclusive()
     }
@@ -376,7 +376,7 @@ pub type Spin<T> = lock_api::Mutex<RawSpin, T>;
 pub type RwSpin<T> = lock_api::RwLock<RawRwSpin, T>;
 
 #[cfg(debug_assertions)]
-#[inline(always)]
+#[inline]
 fn locks_count_check(count: usize, failure: impl FnOnce()) {
     if count < EXCLUSIVE_PENDING {
         if count > SHARED_LOCK_THRESHOLD {
