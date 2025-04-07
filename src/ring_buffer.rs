@@ -194,7 +194,25 @@ impl<T> RingBuffer<T> {
         Some(value)
     }
 
-    #[inline(always)]
+    #[inline]
+    pub fn iter(&self) -> Iter<'_, T> {
+        let (front, back) = self.as_slices();
+        Iter {
+            front: front.iter(),
+            back: back.iter(),
+        }
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+        let (front, back) = self.as_mut_slices();
+        IterMut {
+            front: front.iter_mut(),
+            back: back.iter_mut(),
+        }
+    }
+
+    #[inline]
     pub fn drain(&mut self) -> Drain<'_, T> {
         Drain {
             len: self.len,
@@ -202,56 +220,506 @@ impl<T> RingBuffer<T> {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn capacity(&self) -> usize {
         self.array.len()
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
 
-    #[inline(always)]
+    #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
         self.len = len;
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn head(&self) -> usize {
         self.head
     }
 
-    #[inline(always)]
+    #[inline]
     pub unsafe fn set_head(&mut self, head: usize) {
         self.head = head;
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn as_ptr(&self) -> *const T {
         // Cast `*const MaybeUninit<T>` to `*const T` is valid.
         self.array.as_ptr().cast::<T>()
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut T {
         // Cast `*const MaybeUninit<T>` to `*const T` is valid.
         self.array.as_mut_ptr().cast::<T>()
     }
 
-    #[inline(always)]
+    #[inline]
     #[doc(hidden)]
     pub fn as_unsafe_cell_mut(&mut self) -> &mut RingBuffer<UnsafeCell<T>> {
         // Safety: UnsafeCell<MaybeUninit<T>> is layout compatible with UnsafeCell<MaybeUninit<T>>.
         // Note that this function has mutable reference to self.
         // It temporary allows to mutate elements of the buffer with shared borrow.
         unsafe { &mut *(self as *mut Self as *mut RingBuffer<UnsafeCell<T>>) }
+    }
+}
+
+pub struct Iter<'a, T> {
+    front: core::slice::Iter<'a, T>,
+    back: core::slice::Iter<'a, T>,
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a T> {
+        self.front.next().or(self.back.next())
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.front.len() + self.back.len(), None)
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<&'a T> {
+        if n >= self.front.len() {
+            self.front.nth(self.front.len());
+            self.back.nth(n - self.front.len())
+        } else {
+            self.front.nth(n)
+        }
+    }
+
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, &'a T) -> B,
+    {
+        let mut state = init;
+        for item in self.front {
+            state = f(state, item);
+        }
+        for item in self.back {
+            state = f(state, item);
+        }
+        state
+    }
+
+    #[inline]
+    fn for_each<F>(self, mut f: F)
+    where
+        F: FnMut(&'a T),
+    {
+        for item in self.front {
+            f(item);
+        }
+        for item in self.back {
+            f(item);
+        }
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.front.len() + self.back.len()
+    }
+
+    #[inline]
+    fn last(self) -> Option<&'a T> {
+        self.back.last().or(self.front.last())
+    }
+
+    #[inline]
+    fn all<F>(&mut self, mut f: F) -> bool
+    where
+        F: FnMut(&'a T) -> bool,
+    {
+        for item in &mut self.front {
+            if !f(item) {
+                return false;
+            }
+        }
+
+        for item in &mut self.back {
+            if !f(item) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    #[inline]
+    fn any<F>(&mut self, mut f: F) -> bool
+    where
+        F: FnMut(&'a T) -> bool,
+    {
+        for item in &mut self.front {
+            if f(item) {
+                return true;
+            }
+        }
+
+        for item in &mut self.back {
+            if f(item) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[inline]
+    fn find<P>(&mut self, mut predicate: P) -> Option<&'a T>
+    where
+        P: FnMut(&&'a T) -> bool,
+    {
+        for item in &mut self.front {
+            if predicate(&item) {
+                return Some(item);
+            }
+        }
+
+        for item in &mut self.back {
+            if predicate(&item) {
+                return Some(item);
+            }
+        }
+
+        None
+    }
+
+    #[inline]
+    fn position<P>(&mut self, mut predicate: P) -> Option<usize>
+    where
+        P: FnMut(&'a T) -> bool,
+    {
+        let mut pos = 0;
+        for item in &mut self.front {
+            if predicate(item) {
+                return Some(pos);
+            }
+            pos += 1;
+        }
+
+        for item in &mut self.back {
+            if predicate(item) {
+                return Some(pos);
+            }
+            pos += 1;
+        }
+
+        None
+    }
+
+    #[inline]
+    fn rposition<P>(&mut self, mut predicate: P) -> Option<usize>
+    where
+        P: FnMut(Self::Item) -> bool,
+    {
+        let mut pos = self.back.len() + self.front.len();
+        for item in self.back.by_ref().rev() {
+            pos -= 1;
+            if predicate(item) {
+                return Some(pos);
+            }
+        }
+
+        for item in self.front.by_ref().rev() {
+            pos -= 1;
+            if predicate(item) {
+                return Some(pos);
+            }
+        }
+
+        None
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'a T> {
+        self.back.next_back().or(self.front.next_back())
+    }
+
+    #[inline]
+    fn nth_back(&mut self, n: usize) -> Option<&'a T> {
+        if n >= self.back.len() {
+            self.back.nth_back(self.back.len());
+            self.front.nth_back(n - self.back.len())
+        } else {
+            self.back.nth_back(n)
+        }
+    }
+
+    #[inline]
+    fn rfold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, &'a T) -> B,
+    {
+        let mut state = init;
+        for item in self.back.rev() {
+            state = f(state, item);
+        }
+        for item in self.front.rev() {
+            state = f(state, item);
+        }
+        state
+    }
+
+    #[inline]
+    fn rfind<P>(&mut self, mut predicate: P) -> Option<&'a T>
+    where
+        P: FnMut(&&'a T) -> bool,
+    {
+        for item in self.back.by_ref().rev() {
+            if predicate(&item) {
+                return Some(item);
+            }
+        }
+
+        for item in self.front.by_ref().rev() {
+            if predicate(&item) {
+                return Some(item);
+            }
+        }
+
+        None
+    }
+}
+
+pub struct IterMut<'a, T> {
+    front: core::slice::IterMut<'a, T>,
+    back: core::slice::IterMut<'a, T>,
+}
+
+impl<'a, T> Iterator for IterMut<'a, T> {
+    type Item = &'a mut T;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a mut T> {
+        self.front.next().or(self.back.next())
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.front.len() + self.back.len(), None)
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<&'a mut T> {
+        if n >= self.front.len() {
+            self.front.nth(self.front.len());
+            self.back.nth(n - self.front.len())
+        } else {
+            self.front.nth(n)
+        }
+    }
+
+    #[inline]
+    fn fold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, &'a mut T) -> B,
+    {
+        let mut state = init;
+        for item in self.front {
+            state = f(state, item);
+        }
+        for item in self.back {
+            state = f(state, item);
+        }
+        state
+    }
+
+    #[inline]
+    fn for_each<F>(self, mut f: F)
+    where
+        F: FnMut(&'a mut T),
+    {
+        for item in self.front {
+            f(item);
+        }
+        for item in self.back {
+            f(item);
+        }
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.front.len() + self.back.len()
+    }
+
+    #[inline]
+    fn last(self) -> Option<&'a mut T> {
+        self.back.last().or(self.front.last())
+    }
+
+    #[inline]
+    fn all<F>(&mut self, mut f: F) -> bool
+    where
+        F: FnMut(&'a mut T) -> bool,
+    {
+        for item in &mut self.front {
+            if !f(item) {
+                return false;
+            }
+        }
+
+        for item in &mut self.back {
+            if !f(item) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    #[inline]
+    fn any<F>(&mut self, mut f: F) -> bool
+    where
+        F: FnMut(&'a mut T) -> bool,
+    {
+        for item in &mut self.front {
+            if f(item) {
+                return true;
+            }
+        }
+
+        for item in &mut self.back {
+            if f(item) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[inline]
+    fn find<P>(&mut self, mut predicate: P) -> Option<&'a mut T>
+    where
+        P: FnMut(&&'a mut T) -> bool,
+    {
+        for item in &mut self.front {
+            if predicate(&item) {
+                return Some(item);
+            }
+        }
+
+        for item in &mut self.back {
+            if predicate(&item) {
+                return Some(item);
+            }
+        }
+
+        None
+    }
+
+    #[inline]
+    fn position<P>(&mut self, mut predicate: P) -> Option<usize>
+    where
+        P: FnMut(&'a mut T) -> bool,
+    {
+        let mut pos = 0;
+        for item in &mut self.front {
+            if predicate(item) {
+                return Some(pos);
+            }
+            pos += 1;
+        }
+
+        for item in &mut self.back {
+            if predicate(item) {
+                return Some(pos);
+            }
+            pos += 1;
+        }
+
+        None
+    }
+
+    #[inline]
+    fn rposition<P>(&mut self, mut predicate: P) -> Option<usize>
+    where
+        P: FnMut(Self::Item) -> bool,
+    {
+        let mut pos = self.back.len() + self.front.len();
+        for item in self.back.by_ref().rev() {
+            pos -= 1;
+            if predicate(item) {
+                return Some(pos);
+            }
+        }
+
+        for item in self.front.by_ref().rev() {
+            pos -= 1;
+            if predicate(item) {
+                return Some(pos);
+            }
+        }
+
+        None
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'a mut T> {
+        self.back.next_back().or(self.front.next_back())
+    }
+
+    #[inline]
+    fn nth_back(&mut self, n: usize) -> Option<&'a mut T> {
+        if n >= self.back.len() {
+            self.back.nth_back(self.back.len());
+            self.front.nth_back(n - self.back.len())
+        } else {
+            self.back.nth_back(n)
+        }
+    }
+
+    #[inline]
+    fn rfold<B, F>(self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, &'a mut T) -> B,
+    {
+        let mut state = init;
+        for item in self.back.rev() {
+            state = f(state, item);
+        }
+        for item in self.front.rev() {
+            state = f(state, item);
+        }
+        state
+    }
+
+    #[inline]
+    fn rfind<P>(&mut self, mut predicate: P) -> Option<&'a mut T>
+    where
+        P: FnMut(&&'a mut T) -> bool,
+    {
+        for item in self.back.by_ref().rev() {
+            if predicate(&item) {
+                return Some(item);
+            }
+        }
+
+        for item in self.front.by_ref().rev() {
+            if predicate(&item) {
+                return Some(item);
+            }
+        }
+
+        None
     }
 }
 
@@ -295,13 +763,13 @@ impl<T> Iterator for Drain<'_, T> {
         Some(value)
     }
 
-    #[inline(always)]
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let len = self.len;
         (len, Some(len))
     }
 
-    #[inline(always)]
+    #[inline]
     fn count(self) -> usize {
         self.len
     }
@@ -349,7 +817,7 @@ impl<T> Iterator for Drain<'_, T> {
 }
 
 impl<T> ExactSizeIterator for Drain<'_, T> {
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
         self.len
     }
@@ -376,7 +844,7 @@ unsafe fn drop_two_slices<T>(front: *mut [T], back: *mut [T]) {
     }
 }
 
-#[inline(always)]
+#[inline]
 pub(crate) fn ring_index(head: usize, index: usize, cap: usize) -> usize {
     debug_assert!(head < cap, "head must fit into the capacity");
     debug_assert!(index <= cap, "index must be less than or equal to capacity");
@@ -390,7 +858,7 @@ pub(crate) fn ring_index(head: usize, index: usize, cap: usize) -> usize {
     }
 }
 
-#[inline(always)]
+#[inline]
 fn new_cap<T>(cap: usize) -> usize {
     match cap.checked_add(cap) {
         Some(new_cap) => new_cap.max(RingBuffer::<T>::MIN_NON_ZERO_CAP),
