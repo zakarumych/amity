@@ -287,7 +287,7 @@ for thread_id in 0..4 {
     let handle = thread::spawn(move || {
         for i in 0..25 {
             let value = thread_id * 100 + i;
-            queue_clone.push(value);
+            queue_clone.push_sync(value);
             println!("Thread {} pushed {}", thread_id, value);
         }
     });
@@ -304,7 +304,7 @@ let items: Vec<_> = queue.drain_locking(|drain| drain.collect());
 println!("Collected {} items", items.len());
 
 // Alternative approach: swap with an empty buffer for bulk processing
-let queue = FlipQueue::<String>::new();
+let mut queue = FlipQueue::<String>::new();
 
 // Add some items
 for i in 0..10 {
