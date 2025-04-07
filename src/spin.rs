@@ -369,10 +369,10 @@ unsafe impl lock_api::RawRwLock for RawRwSpin {
     }
 }
 
-/// Mutex type that uses [`RawSpin`](RawSpin).
+/// Mutex type that uses [`RawSpin`].
 pub type Spin<T> = lock_api::Mutex<RawSpin, T>;
 
-/// Read-write mutex type that uses [`RawRwSpin`](RawRwSpin).
+/// Read-write mutex type that uses [`RawRwSpin`].
 pub type RwSpin<T> = lock_api::RwLock<RawRwSpin, T>;
 
 #[cfg(debug_assertions)]

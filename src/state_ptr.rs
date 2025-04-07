@@ -325,6 +325,12 @@ impl<T> AtomicPtrState<T> {
     /// the comparison fails. Using [`Acquire`] as success ordering makes the store part
     /// of this operation [`Relaxed`], and using [`Release`] makes the successful load
     /// [`Relaxed`]. The failure ordering can only be [`SeqCst`], [`Acquire`] or [`Relaxed`].
+    ///
+    /// [`Ordering`]: core::sync::atomic::Ordering
+    /// [`Acquire`]: core::sync::atomic::Ordering::Acquire
+    /// [`Release`]: core::sync::atomic::Ordering::Release
+    /// [`Relaxed`]: core::sync::atomic::Ordering::Relaxed
+    /// [`SeqCst`]: core::sync::atomic::Ordering::SeqCst
     #[allow(clippy::missing_errors_doc)]
     #[inline(always)]
     pub fn compare_exchange(
@@ -354,6 +360,12 @@ impl<T> AtomicPtrState<T> {
     /// the comparison fails. Using [`Acquire`] as success ordering makes the store part
     /// of this operation [`Relaxed`], and using [`Release`] makes the successful load
     /// [`Relaxed`]. The failure ordering can only be [`SeqCst`], [`Acquire`] or [`Relaxed`].
+    ///
+    /// [`Ordering`]: core::sync::atomic::Ordering
+    /// [`Acquire`]: core::sync::atomic::Ordering::Acquire
+    /// [`Release`]: core::sync::atomic::Ordering::Release
+    /// [`Relaxed`]: core::sync::atomic::Ordering::Relaxed
+    /// [`SeqCst`]: core::sync::atomic::Ordering::SeqCst
     #[allow(clippy::missing_errors_doc)]
     #[inline(always)]
     pub fn compare_exchange_weak(
