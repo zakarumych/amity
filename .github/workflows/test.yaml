@@ -1,0 +1,25 @@
+name: test-main
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        alloc: ["", "alloc,"]
+        std: ["", "std,"]
+        spin: ["", "spin,"]
+        parking_lot: ["", "parking_lot,"]
+        triple: ["", "triple,", "broad"]
+        flip: ["", "ring-buffer,", "flip-queue",]
+        rust-channel: ["+stable", "+nightly"]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Run cargo test
+      run: cargo ${{ matrix.rust-channel }} test --all --features=${{ matrix.alloc }}${{ matrix.std }}${{ matrix.spin }}${{ matrix.parking_lot }}${{ matrix.triple }}${{ matrix.flip }}
