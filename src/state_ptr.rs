@@ -9,7 +9,7 @@
 use core::{
     marker::PhantomData,
     mem::align_of,
-    ptr::null_mut,
+    ptr::{from_mut, from_ref, null_mut},
     sync::atomic::{AtomicPtr, Ordering},
 };
 
@@ -148,14 +148,14 @@ impl<T> PtrState<T> {
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn new_ref(ptr: &T, state: State<T>) -> Self {
-        PtrState::new(std::ptr::from_ref(ptr).cast_mut(), state)
+        PtrState::new(from_ref(ptr).cast_mut(), state)
     }
 
     /// Creates new `PtrState` from mutable reference and state.
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn new_mut(ptr: &mut T, state: State<T>) -> Self {
-        PtrState::new(std::ptr::from_mut(ptr), state)
+        PtrState::new(from_mut(ptr), state)
     }
 
     /// Creates new `PtrState` with pointer and zero state.
@@ -264,14 +264,14 @@ impl<T> AtomicPtrState<T> {
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn new_ref(ptr: &T, state: State<T>) -> Self {
-        AtomicPtrState::new(std::ptr::from_ref(ptr).cast_mut(), state)
+        AtomicPtrState::new(from_ref(ptr).cast_mut(), state)
     }
 
     /// Creates new `AtomicPtrState` from mutable reference and state.
     /// State is wrapped to ensure that only lower bits may be set.
     #[inline(always)]
     pub fn new_mut(ptr: &mut T, state: State<T>) -> Self {
-        AtomicPtrState::new(std::ptr::from_mut(ptr), state)
+        AtomicPtrState::new(from_mut(ptr), state)
     }
 
     /// Creates new `AtomicPtrState` with pointer and zero state.

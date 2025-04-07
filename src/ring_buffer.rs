@@ -232,7 +232,8 @@ impl<T> RingBuffer<T> {
     }
 
     #[inline(always)]
-    pub(crate) fn as_unsafe_cell_mut(&mut self) -> &mut RingBuffer<UnsafeCell<T>> {
+    #[doc(hidden)]
+    pub fn as_unsafe_cell_mut(&mut self) -> &mut RingBuffer<UnsafeCell<T>> {
         // Safety: UnsafeCell<MaybeUninit<T>> is layout compatible with UnsafeCell<MaybeUninit<T>>.
         // Note that this function has mutable reference to self.
         // It temporary allows to mutate elements of the buffer with shared borrow.
