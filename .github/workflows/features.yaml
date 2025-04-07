@@ -15,7 +15,7 @@ jobs:
         std: ["", "alloc,", "std,"]
         spin: ["", "spin,"]
         parking_lot: ["", "parking_lot,"]
-        triple: ["", "triple,", "broad"]
+        triple: ["", "triple,", "broad,"]
         flip: ["", "ring-buffer,", "flip-queue",]
     steps:
     - uses: actions/checkout@v4
