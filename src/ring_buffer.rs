@@ -3,8 +3,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{
     cell::UnsafeCell,
     mem::{MaybeUninit, replace, size_of},
-    ptr::{copy_nonoverlapping, drop_in_place},
-    slice::{from_raw_parts, from_raw_parts_mut},
+    ptr::{copy_nonoverlapping, drop_in_place, slice_from_raw_parts, slice_from_raw_parts_mut},
 };
 
 use crate::capacity_overflow;
@@ -28,10 +27,9 @@ unsafe impl<T> Sync for RingBuffer<T> where T: Sync {}
 
 impl<T> Drop for RingBuffer<T> {
     fn drop(&mut self) {
-        let (front, back) = self.as_mut_slices();
+        let (front, back) = self.as_mut_slice_pointers();
         unsafe {
-            let _back_dropped = Dropper(back);
-            drop_in_place(front);
+            drop_two_slices(front, back);
         }
     }
 }
@@ -77,22 +75,18 @@ impl<T> RingBuffer<T> {
     #[inline]
     #[must_use]
     pub fn as_slices(&self) -> (&[T], &[T]) {
-        let front_len = self.len.min(self.array.len() - self.head);
-        let back_len = self.len - front_len;
-        unsafe {
-            // Cast `*constUnsafeCell<MaybeUninit<T>>` to `*constT` is valid.
-            let ptr: *const T = self.array.as_ptr().cast::<T>();
-            let front_ptr = ptr.add(self.head);
-
-            let front = from_raw_parts(front_ptr, front_len);
-            let back = from_raw_parts(ptr, back_len);
-
-            (front, back)
-        }
+        let (front, back) = self.as_slice_pointers();
+        unsafe { (&*front, &*back) }
     }
 
     #[inline]
     pub fn as_mut_slices(&mut self) -> (&mut [T], &mut [T]) {
+        let (front, back) = self.as_mut_slice_pointers();
+        unsafe { (&mut *front, &mut *back) }
+    }
+
+    #[inline]
+    fn as_mut_slice_pointers(&mut self) -> (*mut [T], *mut [T]) {
         let front_len = self.len.min(self.array.len() - self.head);
         let back_len = self.len - front_len;
         unsafe {
@@ -100,8 +94,24 @@ impl<T> RingBuffer<T> {
             let ptr: *mut T = self.array.as_mut_ptr().cast::<T>();
             let front_ptr = ptr.add(self.head);
 
-            let front = from_raw_parts_mut(front_ptr, front_len);
-            let back = from_raw_parts_mut(ptr, back_len);
+            let front = slice_from_raw_parts_mut(front_ptr, front_len);
+            let back = slice_from_raw_parts_mut(ptr, back_len);
+
+            (front, back)
+        }
+    }
+
+    #[inline]
+    fn as_slice_pointers(&self) -> (*const [T], *const [T]) {
+        let front_len = self.len.min(self.array.len() - self.head);
+        let back_len = self.len - front_len;
+        unsafe {
+            // Cast `*mut MaybeUninit<T>` to `*mut T` is valid.
+            let ptr: *const T = self.array.as_ptr().cast::<T>();
+            let front_ptr = ptr.add(self.head);
+
+            let front = slice_from_raw_parts(front_ptr, front_len);
+            let back = slice_from_raw_parts(ptr, back_len);
 
             (front, back)
         }
@@ -117,8 +127,7 @@ impl<T> RingBuffer<T> {
         self.len = 0;
 
         unsafe {
-            let _back_dropped = Dropper(&mut *back);
-            drop_in_place(front);
+            drop_two_slices(front, back);
         }
     }
 
@@ -220,6 +229,11 @@ impl<T> RingBuffer<T> {
     }
 
     #[inline(always)]
+    pub unsafe fn set_head(&mut self, head: usize) {
+        self.head = head;
+    }
+
+    #[inline(always)]
     pub fn as_ptr(&self) -> *const T {
         // Cast `*const MaybeUninit<T>` to `*const T` is valid.
         self.array.as_ptr().cast::<T>()
@@ -311,23 +325,23 @@ impl<T> Iterator for Drain<'_, T> {
         self.ring_buffer.len -= n;
         self.len -= n;
 
-        let front_len = n.min(self.ring_buffer.array.len() - head);
-        let back_len = n - front_len;
+        let front_n = n.min(self.ring_buffer.array.len() - head);
+        let back_n = n - front_n;
         let (front, back) = unsafe {
             // Cast `*mut MaybeUninit<T>` to `*mut T` is valid.
             let ptr = self.ring_buffer.array.as_mut_ptr().cast::<T>();
             let front_ptr = ptr.add(head);
 
-            let front = from_raw_parts_mut(front_ptr, front_len);
-            let back = from_raw_parts_mut(ptr, back_len);
+            let front = slice_from_raw_parts_mut(front_ptr, front_n);
+            let back = slice_from_raw_parts_mut(ptr, back_n);
 
             (front, back)
         };
 
         debug_assert_eq!(back.len() + front.len(), n);
-        let _back_dropper = Dropper(&mut back[..new_head]);
+
         unsafe {
-            drop_in_place(front);
+            drop_two_slices(front, back);
         }
 
         self.next()
@@ -341,27 +355,39 @@ impl<T> ExactSizeIterator for Drain<'_, T> {
     }
 }
 
-struct Dropper<'a, T>(&'a mut [T]);
+/// Drops two slices.
+/// First drops `front`, then `back`.
+///
+/// Drops both even in case of panic.
+unsafe fn drop_two_slices<T>(front: *mut [T], back: *mut [T]) {
+    struct Dropper<T>(*mut [T]);
 
-impl<'a, T> Drop for Dropper<'a, T> {
-    fn drop(&mut self) {
-        unsafe {
-            drop_in_place(self.0);
+    impl<T> Drop for Dropper<T> {
+        fn drop(&mut self) {
+            unsafe {
+                drop_in_place(self.0);
+            }
         }
+    }
+
+    unsafe {
+        let _back_dropped = Dropper(back);
+        drop_in_place(front);
     }
 }
 
 #[inline(always)]
-pub(crate) fn ring_index(head: usize, len: usize, cap: usize) -> usize {
-    let (sum, wrap) = head.overflowing_add(len);
-    let sum = if wrap { dewrap(sum, cap) } else { sum };
-    sum % cap
-}
+pub(crate) fn ring_index(head: usize, index: usize, cap: usize) -> usize {
+    debug_assert!(head < cap, "head must fit into the capacity");
+    debug_assert!(index <= cap, "index must be less than or equal to capacity");
 
-#[inline(always)]
-#[cold]
-fn dewrap(sum: usize, cap: usize) -> usize {
-    (sum % cap).wrapping_sub(cap)
+    let tail = cap - head;
+
+    if tail > index {
+        return head + index;
+    } else {
+        index - tail
+    }
 }
 
 #[inline(always)]
