@@ -214,10 +214,7 @@ impl<T> RingBuffer<T> {
 
     #[inline]
     pub fn drain(&mut self) -> Drain<'_, T> {
-        Drain {
-            len: self.len,
-            ring_buffer: self,
-        }
+        Drain { ring_buffer: self }
     }
 
     #[inline]
@@ -725,7 +722,6 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 
 pub struct Drain<'a, T> {
     ring_buffer: &'a mut RingBuffer<T>,
-    len: usize,
 }
 
 impl<T> Drop for Drain<'_, T> {
@@ -738,8 +734,8 @@ impl<T> Iterator for Drain<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
-        debug_assert_eq!(self.len, self.ring_buffer.len);
-        if self.len == 0 {
+        debug_assert_eq!(self.ring_buffer.len, self.ring_buffer.len);
+        if self.ring_buffer.len == 0 {
             // Queue is empty.
             return None;
         }
@@ -748,7 +744,6 @@ impl<T> Iterator for Drain<'_, T> {
 
         self.ring_buffer.head = (self.ring_buffer.head + 1) % self.ring_buffer.array.len();
         self.ring_buffer.len -= 1;
-        self.len -= 1;
 
         // Safety: head index never gets greater than or equal to array length.
         // If tail > 0 the head index was initialized with value.
@@ -765,22 +760,22 @@ impl<T> Iterator for Drain<'_, T> {
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.len;
+        let len = self.ring_buffer.len;
         (len, Some(len))
     }
 
     #[inline]
     fn count(self) -> usize {
-        self.len
+        self.ring_buffer.len
     }
 
     fn nth(&mut self, n: usize) -> Option<T> {
-        debug_assert_eq!(self.len, self.ring_buffer.len);
+        debug_assert_eq!(self.ring_buffer.len, self.ring_buffer.len);
         if n == 0 {
             return self.next();
         }
 
-        if self.len <= n {
+        if self.ring_buffer.len <= n {
             self.ring_buffer.clear();
             // Queue is empty.
             return None;
@@ -791,7 +786,6 @@ impl<T> Iterator for Drain<'_, T> {
 
         self.ring_buffer.head = new_head;
         self.ring_buffer.len -= n;
-        self.len -= n;
 
         let front_n = n.min(self.ring_buffer.array.len() - head);
         let back_n = n - front_n;
@@ -819,7 +813,7 @@ impl<T> Iterator for Drain<'_, T> {
 impl<T> ExactSizeIterator for Drain<'_, T> {
     #[inline]
     fn len(&self) -> usize {
-        self.len
+        self.ring_buffer.len
     }
 }
 

@@ -72,6 +72,10 @@ impl<T> FlipBuffer<T> {
         let popped = replace(self.popped.get_mut(), 0);
         let pushed = replace(self.pushed.get_mut(), 0);
 
+        if popped == 0 && pushed == 0 {
+            return;
+        }
+
         let popped = match usize::try_from(popped) {
             Ok(popped) if popped <= len => popped,
             _ => len,
