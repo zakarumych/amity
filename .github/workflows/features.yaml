@@ -12,14 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        alloc: ["", "alloc,"]
-        std: ["", "std,"]
+        std: ["", "alloc,", "std,"]
         spin: ["", "spin,"]
         parking_lot: ["", "parking_lot,"]
         triple: ["", "triple,", "broad"]
         flip: ["", "ring-buffer,", "flip-queue",]
-        rust-channel: ["+stable", "+nightly"]
     steps:
     - uses: actions/checkout@v4
     - name: Run cargo test
-      run: cargo ${{ matrix.rust-channel }} test --all --features=${{ matrix.alloc }}${{ matrix.std }}${{ matrix.spin }}${{ matrix.parking_lot }}${{ matrix.triple }}${{ matrix.flip }}
+      run: cargo +nightly test --all --features=${{ matrix.std }}${{ matrix.spin }}${{ matrix.parking_lot }}${{ matrix.triple }}${{ matrix.flip }}

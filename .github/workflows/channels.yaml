@@ -1,0 +1,20 @@
+name: test-main
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        channel: ["stable", "beta", "nightly"]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Run cargo test
+      run: cargo +${{ matrix.channel }} test --all --all-features
+
