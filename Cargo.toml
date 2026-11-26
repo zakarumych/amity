@@ -1,11 +1,10 @@
 [package]
 name = "amity"
-version = "0.6.3"
+version = "0.7.0"
 edition = "2024"
-authors = ["Zakarum <zaq.dev@icloud.com>"]
+authors = ["Zakarum <roman@barykin.me>"]
 license = "MIT OR Apache-2.0"
 documentation = "https://docs.rs/amity"
-homepage = "https://github.com/zakarumych/amity"
 repository = "https://github.com/zakarumych/amity"
 readme = "README.md"
 description = "Concurrency algorithms"
@@ -17,16 +16,16 @@ std = ["alloc"]
 alloc = []
 default = ["std"]
 
-spin = []
+spin = ["dep:lock_api"]
 ring-buffer = ["alloc"]
 flip-queue = ["spin", "ring-buffer"]
 triple = []
 broad = ["alloc", "spin", "triple"]
 
 [dependencies]
-lock_api = { version = "0.4" }
+lock_api = { version = "0.5", optional = true }
 
-parking_lot = { version = "0.12", optional = true }
+parking_lot = { version = "0.13", optional = true }
 
 [package.metadata.docs.rs]
 all-features = true

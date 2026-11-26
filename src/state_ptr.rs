@@ -141,6 +141,7 @@ impl<T> PtrState<T> {
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline]
     pub fn new(ptr: *mut T, state: State<T>) -> Self {
+        debug_assert!(ptr.is_aligned(), "pointer must be aligned to carry state");
         PtrState(ptr.cast::<u8>().wrapping_add(state.0).cast())
     }
 
@@ -158,11 +159,8 @@ impl<T> PtrState<T> {
         PtrState::new(from_mut(ptr), state)
     }
 
-    /// Creates new `PtrState` with pointer and zero state.
-    ///
-    /// # Panics
-    ///
-    /// When debug assertions are enabled pointer is checked to not contain any state bits.
+    /// Creates a zero-state value from an aligned pointer.
+    /// Any low bits set in an unaligned pointer are interpreted as state.
     #[inline]
     pub const fn new_zero(ptr: *mut T) -> Self {
         PtrState(ptr)
@@ -255,9 +253,7 @@ impl<T> AtomicPtrState<T> {
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline]
     pub fn new(ptr: *mut T, state: State<T>) -> Self {
-        AtomicPtrState(AtomicPtr::new(
-            ptr.cast::<u8>().wrapping_add(state.0).cast(),
-        ))
+        Self::from_ptr_state(PtrState::new(ptr, state))
     }
 
     /// Creates new `AtomicPtrState` from reference and state.
@@ -281,7 +277,7 @@ impl<T> AtomicPtrState<T> {
     /// When debug assertions are enabled pointer is checked to not contain any state bits.
     #[inline]
     pub fn new_zero(ptr: *mut T) -> Self {
-        AtomicPtrState(AtomicPtr::new(ptr))
+        Self::new(ptr, State::zero())
     }
 
     /// Constructs `AtomicPtrState` from raw pointer.
@@ -298,16 +294,19 @@ impl<T> AtomicPtrState<T> {
         AtomicPtrState(AtomicPtr::new(ptr_state.raw()))
     }
 
+    /// Atomically loads the pointer and its state together.
     #[inline]
     pub fn load(&self, order: Ordering) -> PtrState<T> {
         PtrState(self.0.load(order))
     }
 
+    /// Atomically stores the pointer and its state together.
     #[inline]
     pub fn store(&self, value: PtrState<T>, order: Ordering) {
         self.0.store(value.0, order);
     }
 
+    /// Atomically replaces the pointer and state, returning the previous pair.
     #[inline]
     pub fn swap(&self, value: PtrState<T>, order: Ordering) -> PtrState<T> {
         PtrState(self.0.swap(value.0, order))
@@ -380,4 +379,13 @@ impl<T> AtomicPtrState<T> {
             .map(PtrState)
             .map_err(PtrState)
     }
+}
+
+#[cfg(all(test, debug_assertions))]
+#[test]
+#[should_panic(expected = "pointer must be aligned")]
+fn reject_unaligned_pointer_before_tagging() {
+    let mut word = 0_u32;
+    let ptr = from_mut(&mut word).wrapping_byte_add(1);
+    let _ = PtrState::new(ptr, State::zero());
 }

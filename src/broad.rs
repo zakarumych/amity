@@ -1,5 +1,9 @@
 //! Provides [`Sender`] and [`Receiver`] - broadcasting channel.
 //!
+//! Readers observe the latest publication. Each read holds a shared snapshot
+//! for its callback, which may publish and read again on the same channel.
+//! An in-place write clones a recycled value if a reader still holds it.
+//!
 //! # Example
 //!
 //! ```rust
@@ -26,10 +30,16 @@ use lock_api::{RawRwLock, RwLock};
 
 use crate::triple::{Idx, TripleBuffer};
 
+/// A single-writer channel that shares the latest value with multiple readers.
 pub struct Broadcast<T, L = crate::DefaultRawRwLock> {
-    buffer: TripleBuffer<(T, u64)>,
+    buffer: TripleBuffer<(Arc<T>, u64)>,
     consumer: RwLock<L, Idx>,
+    make_mut: fn(&mut Arc<T>) -> &mut T,
 }
+
+// Internal snapshots borrow the channel for their entire lifetime. Moving the
+// channel therefore transfers exclusive ownership of every payload allocation.
+unsafe impl<T: Send, L: Send> Send for Broadcast<T, L> {}
 
 impl<T, L> Broadcast<T, L>
 where
@@ -37,35 +47,27 @@ where
 {
     /// Update the consumer, fetch consumer value reference,
     /// call provided function with the value and whether it was updated.
-    /// Returns the result of the function.
+    /// The callback holds a snapshot and may read this channel again.
+    /// The receiver version advances after the callback returns successfully.
     pub fn read<R>(&self, current: &mut u64, f: impl FnOnce(&T, bool) -> R) -> R {
-        if !self.buffer.consumed() {
+        let (value, version) = if self.buffer.consumed() {
+            let read = self.consumer.read();
+            // The guard pins the consumer slot until its snapshot is cloned.
+            unsafe { self.buffer.get_unchecked(*read).clone() }
+        } else {
             let mut write = self.consumer.write();
             if !self.buffer.consumed() {
-                let (new_consumer, published) = unsafe { self.buffer.consume(*write) };
-                assert!(published);
+                let (new_consumer, _) = unsafe { self.buffer.consume(*write) };
                 *write = new_consumer;
             }
-
-            let (value, version) = unsafe { self.buffer.get_unchecked(*write) };
-
-            if *version > *current {
-                *current = *version;
-                f(value, true)
-            } else {
-                f(value, false)
-            }
-        } else {
-            let read = self.consumer.read();
-            let (value, version) = unsafe { self.buffer.get_unchecked(*read) };
-
-            if *version > *current {
-                *current = *version;
-                f(value, true)
-            } else {
-                f(value, false)
-            }
+            unsafe { self.buffer.get_unchecked(*write).clone() }
+        };
+        let updated = version > *current;
+        let result = f(&value, updated);
+        if updated {
+            *current = version;
         }
+        result
     }
 
     /// Receive new value if it was set since last receive.
@@ -116,15 +118,22 @@ where
     where
         T: Clone,
     {
-        self.read(current, |buffer, _| value.clone_from(buffer))
+        self.read(current, |buffer, _| value.clone_from(buffer));
     }
 
     /// Calls provided function with mutable reference to the value.
     /// Bumps version and publishes the value.
+    /// If a reader still holds the recycled slot's value, clones it before mutation.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the publication version is exhausted.
     ///
     /// # Safety
     ///
-    /// This function is unsafe because only single producer is allowed to call this function at a time.
+    /// The caller must hold this channel's unique producer index and provide its
+    /// current publication version. All writes, including reentrant writes, must
+    /// be serialized. On return, use the updated index and version for the next write.
     ///
     /// Use `Sender` for safe usage.
     pub unsafe fn write<R>(
@@ -133,15 +142,22 @@ where
         current: &mut u64,
         f: impl FnOnce(&mut T) -> R,
     ) -> R {
-        let (buffer, version) = unsafe { self.buffer.get_unchecked_mut(*producer) };
+        unsafe { self.write_slot(producer, current, |slot| f((self.make_mut)(slot))) }
+    }
 
-        let r = f(buffer);
-
-        *current += 1;
-        *version += *current;
-
+    unsafe fn write_slot<R>(
+        &self,
+        producer: &mut Idx,
+        current: &mut u64,
+        f: impl FnOnce(&mut Arc<T>) -> R,
+    ) -> R {
+        let next = current.checked_add(1).expect("broadcast version exhausted");
+        let (slot, version) = unsafe { self.buffer.get_unchecked_mut(*producer) };
+        let result = f(slot);
+        *version = next;
+        *current = next;
         (*producer, _) = unsafe { self.buffer.publish(*producer) };
-        r
+        result
     }
 
     /// Send new value to all receivers.
@@ -149,14 +165,20 @@ where
     ///
     /// # Safety
     ///
-    /// This function is unsafe because only single producer is allowed to call this function at a time.
+    /// The caller must hold this channel's unique producer index and provide its
+    /// current publication version. All writes, including reentrant writes, must
+    /// be serialized. On return, use the updated index and version for the next write.
     ///
     /// Use `Sender` for safe usage.
     #[inline]
     pub unsafe fn send(&self, producer: &mut Idx, current: &mut u64, value: T) {
         unsafe {
-            self.write(producer, current, move |buffer| {
-                *buffer = value;
+            self.write_slot(producer, current, move |slot| {
+                if let Some(buffer) = Arc::get_mut(slot) {
+                    *buffer = value;
+                } else {
+                    *slot = Arc::new(value);
+                }
             });
         }
     }
@@ -169,7 +191,9 @@ where
     ///
     /// # Safety
     ///
-    /// This function is unsafe because only single producer is allowed to call this function at a time.
+    /// The caller must hold this channel's unique producer index and provide its
+    /// current publication version. All writes, including reentrant writes, must
+    /// be serialized. On return, use the updated index and version for the next write.
     ///
     /// Use `Sender` for safe usage.
     #[inline]
@@ -192,7 +216,9 @@ where
     ///
     /// # Safety
     ///
-    /// This function is unsafe because only single producer is allowed to call this function at a time.
+    /// The caller must hold this channel's unique producer index and provide its
+    /// current publication version. All writes, including reentrant writes, must
+    /// be serialized. On return, use the updated index and version for the next write.
     ///
     /// Use `Sender` for safe usage.
     #[inline]
@@ -213,26 +239,48 @@ where
     where
         T: Clone,
     {
-        let producer = Idx::default();
-        let consumer = producer.other();
         let version = 0;
+        let mut buffer = TripleBuffer::new(
+            (Arc::new(initial.clone()), version),
+            (Arc::new(initial.clone()), version),
+            (Arc::new(initial), version),
+        );
+        let producer = buffer.pending_mut().other();
+        let consumer = producer.other();
 
         let broadcast = Broadcast {
-            buffer: TripleBuffer::new(
-                (initial.clone(), version),
-                (initial.clone(), version),
-                (initial.clone(), version),
-            ),
+            buffer,
             consumer: RwLock::new(consumer),
+            make_mut: Arc::make_mut,
         };
 
         (broadcast, version, producer)
     }
 
     /// Converts the channel into [`Sender`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `producer` identifies the pending or consumer slot,
+    /// or if `version` precedes the latest publication.
     #[inline]
     #[must_use]
-    pub fn into_sender(self, producer: Idx, version: u64) -> Sender<T, L> {
+    pub fn into_sender(mut self, producer: Idx, version: u64) -> Sender<T, L> {
+        let pending = self.buffer.pending_mut();
+        let consumer = *self.consumer.get_mut();
+        assert_ne!(producer, pending, "pending slot belongs to the channel");
+        assert_ne!(producer, consumer, "consumer slot belongs to the readers");
+        let latest = if self.buffer.consumed_mut() {
+            consumer
+        } else {
+            pending
+        };
+        // The channel is exclusively owned during conversion.
+        let latest_version = unsafe { self.buffer.get_unchecked(latest) }.1;
+        assert!(
+            version >= latest_version,
+            "version precedes the latest publication"
+        );
         Sender {
             broadcast: Arc::new(self),
             producer,
@@ -241,6 +289,7 @@ where
     }
 }
 
+/// A reader that tracks the last publication it observed.
 pub struct Receiver<T, L = crate::DefaultRawRwLock> {
     broadcast: Arc<Broadcast<T, L>>,
     version: u64,
@@ -306,10 +355,11 @@ where
     where
         T: Clone,
     {
-        self.broadcast.last_into(&mut self.version, value)
+        self.broadcast.last_into(&mut self.version, value);
     }
 }
 
+/// The sole publisher for a broadcast channel.
 pub struct Sender<T, L = crate::DefaultRawRwLock> {
     broadcast: Arc<Broadcast<T, L>>,
     producer: Idx,
@@ -317,6 +367,7 @@ pub struct Sender<T, L = crate::DefaultRawRwLock> {
 }
 
 impl<T> Sender<T> {
+    /// Creates a channel with the given initial value and the default lock.
     #[inline]
     #[must_use]
     pub fn new(initial: T) -> Self
@@ -331,6 +382,7 @@ impl<T, L> Sender<T, L>
 where
     L: RawRwLock,
 {
+    /// Creates a channel with the given initial value and lock type `L`.
     #[inline]
     #[must_use]
     pub fn with_lock(initial: T) -> Self
@@ -347,6 +399,10 @@ where
 
     /// Write using provided function
     /// and publish the updated value.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the publication version is exhausted.
     #[inline]
     pub fn write<R>(&mut self, f: impl FnOnce(&mut T) -> R) -> R {
         unsafe {
@@ -437,12 +493,6 @@ where
             local: self.local.clone(),
         }
     }
-
-    #[inline]
-    fn clone_from(&mut self, source: &Self) {
-        self.get.clone_from(&source.get);
-        self.local.clone_from(&source.local);
-    }
 }
 
 impl<T, L> Cached<T, L>
@@ -481,5 +531,154 @@ where
     #[inline]
     fn from(get: Receiver<T, L>) -> Self {
         Cached::new(get)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receivers_track_each_publication() {
+        let mut sender = Sender::new(0);
+        let mut receiver = sender.receiver();
+        let mut cached = sender.cached();
+        for value in 1..=12 {
+            sender.send(value);
+            assert_eq!(receiver.recv(), Some(value));
+            assert_eq!(receiver.recv(), None);
+            assert!(cached.update());
+            assert_eq!(*cached.get(), value);
+        }
+    }
+
+    #[test]
+    fn read_callback_retains_its_snapshot_across_publications() {
+        let mut sender = Sender::new(0);
+        let mut outer = sender.receiver();
+        let mut inner = sender.receiver();
+        sender.send(1);
+        outer.read(|snapshot, updated| {
+            assert!(updated);
+            // Check before reentry so a lock held across the callback fails promptly.
+            assert!(inner.broadcast.consumer.try_write().is_some());
+            sender.send(2);
+            assert_eq!(inner.recv(), Some(2));
+            sender.send(3);
+            sender.write(|recycled| {
+                assert_eq!(*recycled, 1);
+                *recycled = 4;
+            });
+            assert_eq!(inner.recv(), Some(4));
+            assert_eq!(*snapshot, 1);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "pending slot")]
+    fn sender_rejects_pending_index() {
+        let (broadcast, version, _) = Broadcast::<u32>::new(0);
+        let pending = broadcast.buffer.pending();
+        let _sender = broadcast.into_sender(pending, version);
+    }
+
+    #[test]
+    #[should_panic(expected = "consumer slot")]
+    fn sender_rejects_consumer_index() {
+        let (mut broadcast, version, _) = Broadcast::<u32>::new(0);
+        let consumer = *broadcast.consumer.get_mut();
+        let _sender = broadcast.into_sender(consumer, version);
+    }
+
+    #[test]
+    #[should_panic(expected = "version precedes")]
+    fn sender_rejects_stale_version() {
+        let (broadcast, mut version, mut producer) = Broadcast::<u32>::new(0);
+        // This test holds the unique producer returned by the constructor.
+        unsafe { broadcast.send(&mut producer, &mut version, 5) };
+        let _sender = broadcast.into_sender(producer, 0);
+    }
+
+    #[cfg(feature = "std")]
+    mod unwind {
+        use super::Sender;
+        use core::cell::Cell;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        struct Payload<'a>(u32, &'a Cell<bool>);
+
+        impl Clone for Payload<'_> {
+            fn clone(&self) -> Self {
+                assert!(!self.1.replace(false), "payload clone failed");
+                Self(self.0, self.1)
+            }
+
+            fn clone_from(&mut self, source: &Self) {
+                self.0 = u32::MAX;
+                *self = source.clone();
+            }
+        }
+
+        #[test]
+        fn cache_retries_publication_after_clone_panics() {
+            let fail = Cell::new(false);
+            let mut sender = Sender::new(Payload(0, &fail));
+            let mut cached = sender.cached();
+            sender.send(Payload(7, &fail));
+
+            fail.set(true);
+            assert!(catch_unwind(AssertUnwindSafe(|| cached.update())).is_err());
+            assert!(cached.update());
+            assert_eq!(cached.get().0, 7);
+            assert!(!cached.update());
+        }
+
+        #[test]
+        fn failed_cache_clone_preserves_value_and_subscription() {
+            let fail = Cell::new(false);
+            let mut original = Sender::new(Payload(1, &fail));
+            let mut cached = original.cached();
+            let source = Sender::new(Payload(2, &fail)).cached();
+
+            fail.set(true);
+            assert!(catch_unwind(AssertUnwindSafe(|| cached.clone_from(&source))).is_err());
+            assert_eq!(cached.get().0, 1);
+            original.send(Payload(3, &fail));
+            assert!(cached.update());
+            assert_eq!(cached.get().0, 3);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn exhausted_version_leaves_publication_intact() {
+        let (broadcast, _, producer) = Broadcast::<u32>::new(0);
+        let mut sender = broadcast.into_sender(producer, u64::MAX - 1);
+        let mut receiver = sender.receiver();
+        sender.send(7);
+        let called = core::cell::Cell::new(false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sender.write(|_| called.set(true));
+        }));
+        assert!(result.is_err());
+        assert!(!called.get());
+        assert_eq!(receiver.recv(), Some(7));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn channels_cross_threads() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Broadcast<core::cell::Cell<u32>>>();
+
+        let mut sender = Sender::new(0);
+        let mut receiver = sender.receiver();
+        std::thread::scope(|scope| {
+            scope.spawn(move || sender.send(1)).join().unwrap();
+            assert_eq!(
+                scope.spawn(move || receiver.recv()).join().unwrap(),
+                Some(1)
+            );
+        });
     }
 }

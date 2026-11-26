@@ -1,9 +1,14 @@
+//! A growable FIFO ring buffer.
+
 use alloc::{boxed::Box, vec::Vec};
 
 use core::{
     cell::UnsafeCell,
     mem::{MaybeUninit, replace, size_of},
-    ptr::{copy_nonoverlapping, drop_in_place, slice_from_raw_parts, slice_from_raw_parts_mut},
+    ops::{Deref, DerefMut},
+    ptr::{
+        NonNull, copy_nonoverlapping, drop_in_place, slice_from_raw_parts, slice_from_raw_parts_mut,
+    },
 };
 
 use crate::capacity_overflow;
@@ -16,14 +21,60 @@ use crate::capacity_overflow;
 /// It is reduced version of `std::collections::VecDeque`.
 /// The advantage of this implementation is that it guaranteed to be ring-buffer
 /// and provides unchecked access to its internals.
+#[repr(C)]
 pub struct RingBuffer<T> {
     head: usize,
     len: usize,
-    array: Box<[MaybeUninit<T>]>,
+    array: Allocation<T>,
+}
+
+// A thin pointer and a length give the allocation a fixed layout for as_unsafe_cell_mut.
+#[repr(C)]
+struct Allocation<T> {
+    ptr: NonNull<MaybeUninit<T>>,
+    len: usize,
+}
+
+impl<T> From<Box<[MaybeUninit<T>]>> for Allocation<T> {
+    fn from(array: Box<[MaybeUninit<T>]>) -> Self {
+        let len = array.len();
+        let ptr = NonNull::from(Box::leak(array)).cast();
+        Self { ptr, len }
+    }
+}
+
+impl<T> Deref for Allocation<T> {
+    type Target = [MaybeUninit<T>];
+
+    fn deref(&self) -> &Self::Target {
+        // Safety: The allocation owns len slots for the lifetime of the borrow.
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl<T> DerefMut for Allocation<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Safety: The exclusive borrow covers the entire allocation.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl<T> Drop for Allocation<T> {
+    fn drop(&mut self) {
+        // Safety: Both the pointer and length come from the owned boxed slice.
+        let array = slice_from_raw_parts_mut(self.ptr.as_ptr(), self.len);
+        unsafe { drop(Box::from_raw(array)) }
+    }
 }
 
 unsafe impl<T> Send for RingBuffer<T> where T: Send {}
 unsafe impl<T> Sync for RingBuffer<T> where T: Sync {}
+
+impl<T> Default for RingBuffer<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl<T> Drop for RingBuffer<T> {
     fn drop(&mut self) {
@@ -43,6 +94,7 @@ impl<T> RingBuffer<T> {
         1
     };
 
+    /// Creates an empty buffer.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
@@ -55,6 +107,7 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Creates an empty buffer with room for at least `cap` elements.
     #[inline]
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
@@ -63,7 +116,7 @@ impl<T> RingBuffer<T> {
         unsafe {
             vec.set_len(vec.capacity());
         }
-        let array = vec.into_boxed_slice();
+        let array = vec.into_boxed_slice().into();
 
         RingBuffer {
             array,
@@ -72,6 +125,7 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Returns the elements in queue order as two slices.
     #[inline]
     #[must_use]
     pub fn as_slices(&self) -> (&[T], &[T]) {
@@ -79,6 +133,7 @@ impl<T> RingBuffer<T> {
         unsafe { (&*front, &*back) }
     }
 
+    /// Returns the elements in queue order as two mutable slices.
     #[inline]
     pub fn as_mut_slices(&mut self) -> (&mut [T], &mut [T]) {
         let (front, back) = self.as_mut_slice_pointers();
@@ -117,11 +172,10 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Drops all elements and retains the capacity.
     #[inline]
     pub fn clear(&mut self) {
-        let (front, back) = self.as_mut_slices();
-        let front = front as *mut [T];
-        let back = back as *mut [T];
+        let (front, back) = self.as_mut_slice_pointers();
 
         self.head = 0;
         self.len = 0;
@@ -131,6 +185,7 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Appends a value, growing the buffer if full.
     pub fn push(&mut self, value: T) {
         if self.len < self.array.len() {
             // Queue is not full.
@@ -170,10 +225,11 @@ impl<T> RingBuffer<T> {
 
             self.head = 0;
             self.len = self.array.len() + 1;
-            let _ = replace(&mut self.array, new_array);
+            let _ = replace(&mut self.array, new_array.into());
         }
     }
 
+    /// Removes the front element, returning `None` if the buffer is empty.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
@@ -194,7 +250,9 @@ impl<T> RingBuffer<T> {
         Some(value)
     }
 
+    /// Borrows the elements in queue order.
     #[inline]
+    #[must_use]
     pub fn iter(&self) -> Iter<'_, T> {
         let (front, back) = self.as_slices();
         Iter {
@@ -203,6 +261,7 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Mutably borrows the elements in queue order.
     #[inline]
     pub fn iter_mut(&mut self) -> IterMut<'_, T> {
         let (front, back) = self.as_mut_slices();
@@ -212,48 +271,72 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Drains elements in queue order. Dropping the iterator clears the remainder.
     #[inline]
     pub fn drain(&mut self) -> Drain<'_, T> {
         Drain { ring_buffer: self }
     }
 
+    /// Returns whether the buffer contains no elements.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// Returns the number of elements the buffer can hold without growing.
     #[inline]
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.array.len()
     }
 
+    /// Returns the number of elements in the buffer.
     #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Sets the number of live elements starting at the head, wrapping at capacity.
+    ///
+    /// # Safety
+    ///
+    /// `len` must fit within the capacity. Before safe access or drop, all slots
+    /// in the resulting range must hold initialized values owned by the buffer.
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
         self.len = len;
     }
 
+    /// Returns the physical index of the queue head.
     #[inline]
+    #[must_use]
     pub fn head(&self) -> usize {
         self.head
     }
 
+    /// Sets the physical index of the first element.
+    ///
+    /// # Safety
+    ///
+    /// `head` must be below capacity, or zero for a zero-capacity buffer. Before
+    /// safe access or drop, the logical range from this head must contain
+    /// initialized values owned by the buffer.
     #[inline]
     pub unsafe fn set_head(&mut self, head: usize) {
         self.head = head;
     }
 
+    /// Returns a pointer to the start of the backing storage.
     #[inline]
+    #[must_use]
     pub fn as_ptr(&self) -> *const T {
         // Cast `*const MaybeUninit<T>` to `*const T` is valid.
         self.array.as_ptr().cast::<T>()
     }
 
+    /// Returns a mutable pointer to the start of the backing storage.
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut T {
         // Cast `*const MaybeUninit<T>` to `*const T` is valid.
@@ -263,13 +346,31 @@ impl<T> RingBuffer<T> {
     #[inline]
     #[doc(hidden)]
     pub fn as_unsafe_cell_mut(&mut self) -> &mut RingBuffer<UnsafeCell<T>> {
-        // Safety: UnsafeCell<MaybeUninit<T>> is layout compatible with UnsafeCell<MaybeUninit<T>>.
-        // Note that this function has mutable reference to self.
-        // It temporary allows to mutate elements of the buffer with shared borrow.
-        unsafe { &mut *(self as *mut Self as *mut RingBuffer<UnsafeCell<T>>) }
+        // Safety: Both repr(C) structures have identical field offsets and thin pointer layout.
+        // UnsafeCell<T> has T's layout and drop behavior. The exclusive borrow covers the conversion.
+        unsafe { &mut *core::ptr::from_mut(self).cast::<RingBuffer<UnsafeCell<T>>>() }
     }
 }
 
+impl<'a, T> IntoIterator for &'a RingBuffer<T> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut RingBuffer<T> {
+    type Item = &'a mut T;
+    type IntoIter = IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+/// Iterates over shared references in queue order.
 pub struct Iter<'a, T> {
     front: core::slice::Iter<'a, T>,
     back: core::slice::Iter<'a, T>,
@@ -280,7 +381,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
     #[inline]
     fn next(&mut self) -> Option<&'a T> {
-        self.front.next().or(self.back.next())
+        self.front.next().or_else(|| self.back.next())
     }
 
     #[inline]
@@ -290,9 +391,10 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
     #[inline]
     fn nth(&mut self, n: usize) -> Option<&'a T> {
-        if n >= self.front.len() {
-            self.front.nth(self.front.len());
-            self.back.nth(n - self.front.len())
+        let front_len = self.front.len();
+        if n >= front_len {
+            self.front.nth(front_len);
+            self.back.nth(n - front_len)
         } else {
             self.front.nth(n)
         }
@@ -381,19 +483,9 @@ impl<'a, T> Iterator for Iter<'a, T> {
     where
         P: FnMut(&&'a T) -> bool,
     {
-        for item in &mut self.front {
-            if predicate(&item) {
-                return Some(item);
-            }
-        }
-
-        for item in &mut self.back {
-            if predicate(&item) {
-                return Some(item);
-            }
-        }
-
-        None
+        self.front
+            .find(&mut predicate)
+            .or_else(|| self.back.find(predicate))
     }
 
     #[inline]
@@ -446,14 +538,15 @@ impl<'a, T> Iterator for Iter<'a, T> {
 impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     #[inline]
     fn next_back(&mut self) -> Option<&'a T> {
-        self.back.next_back().or(self.front.next_back())
+        self.back.next_back().or_else(|| self.front.next_back())
     }
 
     #[inline]
     fn nth_back(&mut self, n: usize) -> Option<&'a T> {
-        if n >= self.back.len() {
-            self.back.nth_back(self.back.len());
-            self.front.nth_back(n - self.back.len())
+        let back_len = self.back.len();
+        if n >= back_len {
+            self.back.nth_back(back_len);
+            self.front.nth_back(n - back_len)
         } else {
             self.back.nth_back(n)
         }
@@ -479,22 +572,13 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     where
         P: FnMut(&&'a T) -> bool,
     {
-        for item in self.back.by_ref().rev() {
-            if predicate(&item) {
-                return Some(item);
-            }
-        }
-
-        for item in self.front.by_ref().rev() {
-            if predicate(&item) {
-                return Some(item);
-            }
-        }
-
-        None
+        self.back
+            .rfind(&mut predicate)
+            .or_else(|| self.front.rfind(predicate))
     }
 }
 
+/// Iterates over mutable references in queue order.
 pub struct IterMut<'a, T> {
     front: core::slice::IterMut<'a, T>,
     back: core::slice::IterMut<'a, T>,
@@ -505,7 +589,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
     #[inline]
     fn next(&mut self) -> Option<&'a mut T> {
-        self.front.next().or(self.back.next())
+        self.front.next().or_else(|| self.back.next())
     }
 
     #[inline]
@@ -515,9 +599,10 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
     #[inline]
     fn nth(&mut self, n: usize) -> Option<&'a mut T> {
-        if n >= self.front.len() {
-            self.front.nth(self.front.len());
-            self.back.nth(n - self.front.len())
+        let front_len = self.front.len();
+        if n >= front_len {
+            self.front.nth(front_len);
+            self.back.nth(n - front_len)
         } else {
             self.front.nth(n)
         }
@@ -606,19 +691,9 @@ impl<'a, T> Iterator for IterMut<'a, T> {
     where
         P: FnMut(&&'a mut T) -> bool,
     {
-        for item in &mut self.front {
-            if predicate(&item) {
-                return Some(item);
-            }
-        }
-
-        for item in &mut self.back {
-            if predicate(&item) {
-                return Some(item);
-            }
-        }
-
-        None
+        self.front
+            .find(&mut predicate)
+            .or_else(|| self.back.find(predicate))
     }
 
     #[inline]
@@ -671,14 +746,15 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
     #[inline]
     fn next_back(&mut self) -> Option<&'a mut T> {
-        self.back.next_back().or(self.front.next_back())
+        self.back.next_back().or_else(|| self.front.next_back())
     }
 
     #[inline]
     fn nth_back(&mut self, n: usize) -> Option<&'a mut T> {
-        if n >= self.back.len() {
-            self.back.nth_back(self.back.len());
-            self.front.nth_back(n - self.back.len())
+        let back_len = self.back.len();
+        if n >= back_len {
+            self.back.nth_back(back_len);
+            self.front.nth_back(n - back_len)
         } else {
             self.back.nth_back(n)
         }
@@ -704,22 +780,13 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
     where
         P: FnMut(&&'a mut T) -> bool,
     {
-        for item in self.back.by_ref().rev() {
-            if predicate(&item) {
-                return Some(item);
-            }
-        }
-
-        for item in self.front.by_ref().rev() {
-            if predicate(&item) {
-                return Some(item);
-            }
-        }
-
-        None
+        self.back
+            .rfind(&mut predicate)
+            .or_else(|| self.front.rfind(predicate))
     }
 }
 
+/// Yields removed elements in queue order and drops the remainder on drop.
 pub struct Drain<'a, T> {
     ring_buffer: &'a mut RingBuffer<T>,
 }
@@ -734,7 +801,6 @@ impl<T> Iterator for Drain<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
-        debug_assert_eq!(self.ring_buffer.len, self.ring_buffer.len);
         if self.ring_buffer.len == 0 {
             // Queue is empty.
             return None;
@@ -770,7 +836,6 @@ impl<T> Iterator for Drain<'_, T> {
     }
 
     fn nth(&mut self, n: usize) -> Option<T> {
-        debug_assert_eq!(self.ring_buffer.len, self.ring_buffer.len);
         if n == 0 {
             return self.next();
         }
@@ -846,7 +911,7 @@ pub(crate) fn ring_index(head: usize, index: usize, cap: usize) -> usize {
     let tail = cap - head;
 
     if tail > index {
-        return head + index;
+        head + index
     } else {
         index - tail
     }
@@ -858,4 +923,48 @@ fn new_cap<T>(cap: usize) -> usize {
         Some(new_cap) => new_cap.max(RingBuffer::<T>::MIN_NON_ZERO_CAP),
         None => capacity_overflow(),
     }
+}
+
+#[test]
+fn iterate_wrapped_buffer() {
+    let mut ring = RingBuffer::with_capacity(4);
+    for value in 0..4 {
+        ring.push(value);
+    }
+    assert_eq!(ring.pop(), Some(0));
+    assert_eq!(ring.pop(), Some(1));
+    ring.push(4);
+    ring.push(5);
+
+    let mut iter = ring.iter();
+    assert_eq!(iter.next(), Some(&2));
+    assert_eq!(iter.next_back(), Some(&5));
+    assert_eq!(iter.next_back(), Some(&4));
+    assert_eq!(iter.next(), Some(&3));
+    assert_eq!(iter.next(), None);
+    assert_eq!(ring.iter().nth(2), Some(&4));
+    assert_eq!(ring.iter().nth_back(2), Some(&3));
+
+    let mut iter = ring.iter_mut();
+    assert_eq!(iter.next().as_deref(), Some(&2));
+    assert_eq!(iter.next_back().as_deref(), Some(&5));
+    assert_eq!(iter.next_back().as_deref(), Some(&4));
+    assert_eq!(iter.next().as_deref(), Some(&3));
+    assert_eq!(iter.next(), None);
+    assert_eq!(ring.iter_mut().nth(2).as_deref(), Some(&4));
+    assert_eq!(ring.iter_mut().nth_back(2).as_deref(), Some(&3));
+
+    let mut iter = (&ring).into_iter();
+    assert_eq!(iter.find(|&&value| value == 3), Some(&3));
+    assert_eq!(iter.next(), Some(&4));
+    let mut iter = ring.iter();
+    assert_eq!(iter.rfind(|&&value| value == 3), Some(&3));
+    assert_eq!(iter.next_back(), Some(&2));
+
+    let mut iter = (&mut ring).into_iter();
+    assert_eq!(iter.find(|value| **value == 4).as_deref(), Some(&4));
+    assert_eq!(iter.next().as_deref(), Some(&5));
+    let mut iter = ring.iter_mut();
+    assert_eq!(iter.rfind(|value| **value == 4).as_deref(), Some(&4));
+    assert_eq!(iter.next_back().as_deref(), Some(&3));
 }

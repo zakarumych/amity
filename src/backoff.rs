@@ -1,7 +1,9 @@
+//! Backoff for retry loops under contention.
+
 /// Waiting hint.
-/// Provides common exponential spin logic.
-/// When spin count exceeds spin limit it switches to yield when "std" feature is enabled.
-/// When spin count exceeds yield limit it advises caller to block thread.
+/// Each wait issues a spin hint until the spin threshold. Subsequent waits
+/// yield the thread with the `std` feature and continue spinning otherwise.
+/// After enough waits, [`should_block`](Self::should_block) advises the caller to block.
 #[derive(Default)]
 pub struct BackOff {
     spin_count: usize,
@@ -11,17 +13,20 @@ impl BackOff {
     const SPIN_THRESHOLD: usize = 7;
     const YIELD_THRESHOLD: usize = 15;
 
+    /// Starts a backoff in the spin phase.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
         BackOff { spin_count: 0 }
     }
 
+    /// Resets the wait count to zero.
     #[inline]
     pub fn reset(&mut self) {
         self.spin_count = 0;
     }
 
+    /// Performs one backoff step.
     #[inline]
     pub fn wait(&mut self) {
         if self.spin_count < Self::SPIN_THRESHOLD {
@@ -39,6 +44,7 @@ impl BackOff {
         }
     }
 
+    /// Returns whether enough waits have elapsed to recommend blocking.
     #[must_use]
     pub fn should_block(&self) -> bool {
         self.spin_count >= Self::YIELD_THRESHOLD

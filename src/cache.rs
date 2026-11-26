@@ -1,3 +1,5 @@
+//! Cache-line alignment and padding to reduce false sharing.
+
 use core::ops::{Deref, DerefMut};
 
 #[cfg_attr(

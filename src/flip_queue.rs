@@ -1,15 +1,8 @@
-//! Provides flipping queue type for message passing between multiple producers and single consumer.
-//!
-//! The twist is that message sending cannot happen concurrently with message receiving.
-//! Therefore queue is flipped to either side - producer or consumer.
-//!
-//! This implementation uses borrowing for this purpose.
-//! Shared reference allows to send messages from multiple threads.
-//! Exclusive reference allows to receive messages from single thread.
+//! Queues with concurrent pushes and pops and exclusive access for batch processing.
 
 use core::{
     cell::UnsafeCell,
-    mem::{replace, swap},
+    mem::{swap, take},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -22,23 +15,33 @@ use crate::ring_buffer::{self, RingBuffer, ring_index};
 /// It allows pushing values from multiple threads in parallel until capacity is reached.
 /// After that it requires exclusive borrow to push more values.
 ///
-/// Reading values always requires exclusive borrow.
-///
-/// Thus it doesn't require any internal synchronization primitives.
+/// Shared pops consume elements present at the last exclusive operation.
+/// Exclusive access makes pushed elements available to pop and freed slots available to push.
+/// The process aborts if either shared operation is attempted 2^63 times between flushes.
 pub struct FlipBuffer<T> {
     buffer: RingBuffer<UnsafeCell<T>>,
 
-    /// Number of elements popped via `pop_sync`.
-    /// u64 is used to allow incrementing without overflow.
+    /// Number of `pop_sync` attempts since the last flush.
     popped: AtomicU64,
 
-    /// Number of elements pushed via `push_sync`.
-    /// u64 is used to allow incrementing without overflow.
+    /// Number of `push_sync` attempts since the last flush.
     pushed: AtomicU64,
 }
 
 unsafe impl<T> Sync for FlipBuffer<T> where T: Send {}
 unsafe impl<T> Send for FlipBuffer<T> where T: Send {}
+
+impl<T> Drop for FlipBuffer<T> {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+impl<T> Default for FlipBuffer<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl<T> FlipBuffer<T> {
     /// Create new ring buffer.
@@ -63,24 +66,13 @@ impl<T> FlipBuffer<T> {
 
     /// Flushes atomic pops and pushes.
     fn flush(&mut self) {
-        // Number of elements that could be popped
         let len = self.buffer.len();
-
-        // and pushed
-        let vacant = self.buffer.capacity() - len;
-
-        let popped = replace(self.popped.get_mut(), 0);
-        let pushed = replace(self.pushed.get_mut(), 0);
-
-        let popped = match usize::try_from(popped) {
-            Ok(popped) if popped <= len => popped,
-            _ => len,
-        };
-
-        let pushed = match usize::try_from(pushed) {
-            Ok(pushed) if pushed <= vacant => pushed,
-            _ => vacant,
-        };
+        let popped = usize::try_from(take(self.popped.get_mut()))
+            .unwrap_or(usize::MAX)
+            .min(len);
+        let pushed = usize::try_from(take(self.pushed.get_mut()))
+            .unwrap_or(usize::MAX)
+            .min(self.buffer.capacity() - len);
 
         if popped == 0 && pushed == 0 {
             return;
@@ -104,30 +96,24 @@ impl<T> FlipBuffer<T> {
     /// Attempts to push value to the queue.
     ///
     /// If at full capacity this will fail and return the value back.
+    ///
+    /// # Errors
+    ///
+    /// Function will fail if queue is full, returning the value back.
     pub fn push_sync(&self, value: T) -> Result<(), T> {
-        // Acquire index to write to.
-        let pushed = self.pushed.fetch_add(1, Ordering::Acquire);
-        match usize::try_from(pushed) {
-            Ok(pushed) if pushed < self.buffer.capacity() - self.buffer.len() => {
-                // Queue is not full.
-                let idx = ring_index(
-                    self.buffer.head(),
-                    self.buffer.len() + pushed,
-                    self.buffer.capacity(),
-                );
+        let len = self.buffer.len();
+        let cap = self.buffer.capacity();
+        let Some(pushed) = reserve(&self.pushed, cap - len) else {
+            return Err(value);
+        };
+        let idx = ring_index(self.buffer.head(), len + pushed, cap);
 
-                // Safety: We have exclusive access to the queue at this index.
-                unsafe {
-                    let slot = self.buffer.as_ptr().add(idx);
-                    UnsafeCell::raw_get(slot).write(value);
-                }
-                Ok(())
-            }
-            _ => {
-                // Queue is full.
-                Err(value)
-            }
+        // Safety: This reservation owns a vacant slot until the next exclusive borrow.
+        unsafe {
+            let slot = self.buffer.as_ptr().add(idx);
+            UnsafeCell::raw_get(slot).write(value);
         }
+        Ok(())
     }
 
     /// Push value to the queue.
@@ -144,25 +130,14 @@ impl<T> FlipBuffer<T> {
     ///
     /// Note that values pushed via `push_sync` and not yet flushed do not affect emptiness of the queue.
     pub fn pop_sync(&self) -> Option<T> {
-        // Acquire index to write to.
-        let popped: u64 = self.popped.fetch_add(1, Ordering::Acquire);
-        match usize::try_from(popped) {
-            Ok(popped) if popped < self.buffer.len() => {
-                // Queue is not full.
-                let idx = ring_index(self.buffer.head(), popped, self.buffer.capacity());
+        let popped = reserve(&self.popped, self.buffer.len())?;
+        let idx = ring_index(self.buffer.head(), popped, self.buffer.capacity());
 
-                // Safety: We have exclusive access to the queue at this index.
-                let value = unsafe {
-                    let slot = self.buffer.as_ptr().add(idx);
-                    UnsafeCell::raw_get(slot).read()
-                };
-                Some(value)
-            }
-            _ => {
-                // Queue is empty.
-                None
-            }
-        }
+        // Safety: This reservation owns an initialized slot until the next exclusive borrow.
+        Some(unsafe {
+            let slot = self.buffer.as_ptr().add(idx);
+            UnsafeCell::raw_get(slot).read()
+        })
     }
 
     /// Pop value from the queue.
@@ -185,12 +160,38 @@ impl<T> FlipBuffer<T> {
         }
     }
 
+    /// Flushes pending operations and exchanges the backing buffer with `ring`.
     pub fn swap_buffer(&mut self, ring: &mut RingBuffer<T>) {
         self.flush();
         swap(ring.as_unsafe_cell_mut(), &mut self.buffer);
     }
 }
 
+const ATTEMPT_LIMIT: u64 = 1 << 63;
+
+#[inline]
+fn reserve(counter: &AtomicU64, limit: usize) -> Option<usize> {
+    let ticket = counter.fetch_add(1, Ordering::Acquire);
+    // Leave headroom for concurrent increments while the process is aborting.
+    if ticket >= ATTEMPT_LIMIT - 1 {
+        abort_attempt_overflow();
+    }
+    let index = usize::try_from(ticket).ok()?;
+    (index < limit).then_some(index)
+}
+
+#[cold]
+#[inline(never)]
+extern "C" fn abort_attempt_overflow() -> ! {
+    #[cfg(feature = "std")]
+    std::process::abort();
+
+    // The C ABI prevents the panic from unwinding into the queue operation.
+    #[cfg(not(feature = "std"))]
+    panic!("flip buffer attempt limit reached");
+}
+
+/// A FIFO drain that drops remaining elements when dropped.
 #[must_use = "iterator does nothing unless consumed"]
 pub struct Drain<'a, T> {
     inner: ring_buffer::Drain<'a, UnsafeCell<T>>,
@@ -227,20 +228,9 @@ impl<T> ExactSizeIterator for Drain<'_, T> {
     }
 }
 
-/// Implements flexible flip-queue data structure.
-/// This data structure allows either push values into the queue or pop them from it
-/// like a regular queue.
-/// The advantage `FlipQueue` is that it allows to push values from multiple threads in parallel.
-/// But only when no values are popped from the queue.
-///
-/// Pushing requires shared borrow and popping requires exclusive borrow. This guarantees that above
-/// requirement is met.
-///
-/// When queue is at full capacity it is grown by doubling its size.
-/// Pushing thread will have to lock the queue to grow it.
-///
-/// When capacity is enough to push all values, then pushing is guaranteed to be wait-free.
-/// Popping and draining is wait-free since it uses exclusive borrow.
+/// A growable queue with concurrent pushes and pops.
+/// Shared operations take a read lock to reserve available slots and may wait for a writer.
+/// Growing, flushing shared reservations, and swapping buffers require exclusive access.
 ///
 /// Typical use case of flip-queue is to broadcast `&FlipQueue` to multiple tasks and collect values,
 /// and then after all tasks are finished drain the queue to process collected values.
@@ -303,9 +293,11 @@ where
 
     /// Tries to push value to the queue.
     ///
-    /// If at full capacity this will return the value back.
+    /// This function may block while another operation holds or waits for the write lock.
     ///
-    /// This function may block if concurrent call to `push_sync` grows the queue.
+    /// # Errors
+    ///
+    /// Returns the value if there is no vacant slot available for reservation.
     pub fn try_push_sync(&self, value: T) -> Result<(), T> {
         let read = self.buffer.read();
         // Safety: Shared lock acquired.
@@ -330,16 +322,23 @@ where
         write.push(value);
     }
 
+    /// Appends a value, growing the queue if needed.
     pub fn push(&mut self, value: T) {
         self.buffer.get_mut().push(value);
     }
 
-    /// Tries to pop value from the queue.
+    /// Pops the next available element under a shared lock.
+    /// Returns `None` when the readable slots are exhausted, even if a shared
+    /// push has since succeeded. Use [`pop_sync`](Self::pop_sync) to flush
+    /// pending pushes when the readable slots run out.
+    ///
+    /// Acquiring the shared lock may block behind a writer.
     pub fn try_pop_sync(&self) -> Option<T> {
         let read = self.buffer.read();
         read.pop_sync()
     }
 
+    /// Pops the oldest value, taking the write lock if pending pushes need flushing.
     pub fn pop_sync(&self) -> Option<T> {
         let read = self.buffer.read();
 
@@ -361,14 +360,17 @@ where
         write.pop()
     }
 
+    /// Removes the oldest value, or returns `None` if the queue is empty.
     pub fn pop(&mut self) -> Option<T> {
         self.buffer.get_mut().pop()
     }
 
+    /// Drains the queue in FIFO order.
     pub fn drain(&mut self) -> Drain<'_, T> {
         self.buffer.get_mut().drain()
     }
 
+    /// Calls `f` with a drain while holding the write lock.
     pub fn drain_locking<R>(&self, f: impl FnOnce(Drain<T>) -> R) -> R {
         let mut write = self.buffer.write();
         f(write.drain())
@@ -380,6 +382,83 @@ where
     pub fn swap_buffer(&self, ring: &mut RingBuffer<T>) {
         let mut write = self.buffer.write();
         write.swap_buffer(ring);
+    }
+}
+
+#[test]
+fn swap_wrapped_owned_values() {
+    let mut ring = RingBuffer::with_capacity(2);
+    ring.push(alloc::boxed::Box::new(1));
+    ring.push(alloc::boxed::Box::new(2));
+    drop(ring.pop());
+    ring.push(alloc::boxed::Box::new(3));
+
+    let mut buffer = FlipBuffer::with_capacity(1);
+    buffer.push_sync(alloc::boxed::Box::new(4)).unwrap();
+    buffer.swap_buffer(&mut ring);
+    assert_eq!(ring.pop().as_deref(), Some(&4));
+    assert_eq!(buffer.pop_sync().as_deref(), Some(&2));
+    assert_eq!(buffer.pop().as_deref(), Some(&3));
+}
+
+#[test]
+fn flush_clamps_unsuccessful_attempts() {
+    let mut buffer = FlipBuffer::with_capacity(1);
+    buffer.push_sync(3).unwrap();
+    assert_eq!(buffer.push_sync(4), Err(4));
+    assert_eq!(*buffer.pushed.get_mut(), 2);
+    assert_eq!(buffer.pop_sync(), None);
+    assert_eq!(*buffer.popped.get_mut(), 1);
+
+    buffer.flush();
+    assert_eq!(buffer.pop_sync(), Some(3));
+    assert_eq!(buffer.pop_sync(), None);
+    assert_eq!(*buffer.popped.get_mut(), 2);
+    assert_eq!(buffer.pop(), None);
+}
+
+#[test]
+#[cfg(not(miri))]
+fn abort_on_attempt_limit() {
+    extern crate std;
+    use std::{env, process::Command, string::String};
+
+    const CHILD_OPERATION: &str = "AMITY_FLIP_QUEUE_TEST_ABORT_OPERATION";
+    const MARKER: &str = "attempt below limit returned";
+    if let Ok(operation) = env::var(CHILD_OPERATION) {
+        let mut buffer = FlipBuffer::<u8>::new();
+        match operation.as_str() {
+            "push" => {
+                *buffer.pushed.get_mut() = ATTEMPT_LIMIT - 2;
+                assert_eq!(buffer.push_sync(1), Err(1));
+                std::eprintln!("{MARKER}");
+                let _ = buffer.push_sync(1);
+            }
+            "pop" => {
+                *buffer.popped.get_mut() = ATTEMPT_LIMIT - 2;
+                assert_eq!(buffer.pop_sync(), None);
+                std::eprintln!("{MARKER}");
+                let _ = buffer.pop_sync();
+            }
+            _ => panic!("unknown operation"),
+        }
+        return;
+    }
+
+    for operation in ["push", "pop"] {
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "flip_queue::abort_on_attempt_limit",
+                "--nocapture",
+            ])
+            .env(CHILD_OPERATION, operation)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(MARKER), "{operation}: {stderr}");
+        assert!(!output.status.success(), "{operation} returned");
+        assert_ne!(output.status.code(), Some(101), "{operation} unwound");
     }
 }
 
@@ -400,7 +479,7 @@ fn test_flib_buffer() {
     });
 
     let mut idx = flip_buffer.drain().collect::<Vec<_>>();
-    idx.sort();
+    idx.sort_unstable();
 
     assert_eq!(idx, (0..100).collect::<Vec<_>>());
 }
@@ -422,7 +501,7 @@ fn test_flib_queue() {
     });
 
     let mut idx = flip_queue.drain().collect::<Vec<_>>();
-    idx.sort();
+    idx.sort_unstable();
 
     assert_eq!(idx, (0..100).collect::<Vec<_>>());
 }
@@ -438,7 +517,7 @@ fn test_flib_queue_push_pop() {
         for _ in 0..10 {
             scope.spawn(move || {
                 for _ in 0..10 {
-                    while let None = flip_queue.pop_sync() {
+                    while flip_queue.pop_sync().is_none() {
                         std::thread::yield_now();
                     }
                 }

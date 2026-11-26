@@ -10,11 +10,11 @@
 //! ## Available Algorithms
 //!
 //! ### 🔄 Backoff
-//! Provides utilities for implementing exponential backoff strategies, useful in retry mechanisms.
+//! `BackOff` spins for the first seven waits, then yields the thread when `std` is enabled.
 //!
 //! #### Examples
 //!
-//! Here is an example of using the `BackOff` struct to implement exponential backoff when waiting for a resource:
+//! This example uses `BackOff` while waiting for a resource:
 //!
 //! ```rust
 //! use amity::backoff::BackOff;
@@ -49,7 +49,7 @@
 //!             std::thread::sleep(std::time::Duration::from_millis(10));
 //!             backoff.reset(); // Reset the backoff counter after blocking
 //!         } else {
-//!             // Wait with exponential backoff
+//!             // Wait before retrying
 //!             backoff.wait();
 //!         }
 //!     }
@@ -85,7 +85,7 @@
 //!             break;
 //!         }
 //!
-//!         // Wait with exponential backoff
+//!         // Wait before retrying
 //!         backoff.wait();
 //!     }
 //! }
@@ -261,10 +261,10 @@
 //! Ring buffers are particularly useful in scenarios requiring fixed-size queues or when implementing producer-consumer patterns where elements need to be processed in order.
 //!
 //! ### 🔃 Flip Queue
-//! Queue implementation that allows concurrent writes, but only exclusive reads.
+//! A queue with concurrent pushes and pops and exclusive access for batch draining.
 //! This is useful for scenarios where multiple threads need to write data concurrently, and single thread swaps inner and own `RingBuffer` to read it.
 //!
-//! `FlipBuffer` is lockless version and requires mutable access to read and to expand internal buffer when full.
+//! `FlipBuffer` reserves slots atomically. Exclusive access makes newly pushed values available to pop and allows the buffer to grow.
 //!
 //! `FlipQueue` uses read-write lock to allow concurrent pushes until buffer is full,
 //! and locks it for exclusive access to grow buffer and to swap it with reader.
@@ -368,7 +368,8 @@
 //! ```
 //!
 //! ### 📡 Broad
-//! A broadcast mechanism to notify multiple listeners of events concurrently.  
+//! A broadcast mechanism to notify multiple listeners of events concurrently.
+//!
 //! **Feature:** `broad`
 //!
 //! #### Examples
@@ -395,7 +396,8 @@
 //! ```
 //!
 //! ### 🔁 Spin
-//! Provides a low-latency spinlock implementation for mutual exclusion in critical sections. Also includes a not-totally-unfair read-write spin lock for efficient concurrent read and write operations.  
+//! Provides a low-latency spinlock implementation for mutual exclusion in critical sections. Also includes a not-totally-unfair read-write spin lock for efficient concurrent read and write operations.
+//!
 //! **Feature:** `spin`
 //!
 //! #### Examples
@@ -505,6 +507,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(clippy::pedantic)]
 #![allow(clippy::inline_always)]
+#![deny(missing_docs)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
